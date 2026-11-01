@@ -5,3 +5,4 @@ __pycache__/
 .venv/
 third_party/
 results/runs/
+.DS_Store
