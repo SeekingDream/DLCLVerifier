@@ -1,0 +1,55 @@
+# status: implemented | pilot | unimplemented. Nothing below has a verifier result yet.
+# Sizes are approximate published values and should be recomputed from the exported graph.
+schema_version: 1
+suites:
+  T0_operators:
+    tier: core
+    status: unimplemented
+    items: [add_mul_fma, dot, sum_reduce, mean_reduce, matmul, conv2d, depthwise_conv2d, avg_pool, relu, leaky_relu, gelu, sigmoid, tanh, exp, log, sqrt, softmax, log_softmax, batch_norm_inference, layer_norm, group_norm, cast_f32_f16, cast_f32_bf16, resize_bilinear]
+    shapes: "fixed; sweep n in 2^3..2^20 for reductions"
+  T1_fused_kernels:
+    tier: core
+    status: unimplemented
+    items:
+      - {id: fma_contraction, source_rewrite: "a*b+c -> fma"}
+      - {id: sum_reassociation, source_rewrite: "sequential -> pairwise/vectorized/thread-partitioned"}
+      - {id: conv_bn_fusion, source_rewrite: "Conv+BatchNorm -> Conv with merged constants", status: pilot}
+      - {id: matmul_add_to_gemm, source_rewrite: "MatMul+Add -> Gemm/FusedMatMul"}
+      - {id: conv_add_fusion, source_rewrite: "Conv+Add/Mul constant folding"}
+      - {id: transpose_elision, source_rewrite: "layout changes around conv and dot"}
+      - {id: dot_strength_reduction, source_rewrite: "XLA algebraic simplifier dot rewrites"}
+      - {id: div_to_reciprocal_mul, source_rewrite: "x/c -> x*(1/c), fast-math variant"}
+      - {id: softmax_decomposition, source_rewrite: "softmax -> exp(x-max)/sum"}
+      - {id: scaled_dot_product_attention, source_rewrite: "attention fusion"}
+      - {id: mixed_precision_folding, source_rewrite: "f32->bf16->f32 removal under excess precision"}
+      - {id: polynomial_tanh_exp, source_rewrite: "libm call -> inline polynomial approximation"}
+  T2_components:
+    tier: core
+    status: unimplemented
+    items: [mlp_block, resnet_basic_block, resnet_bottleneck, mobilenet_inverted_residual, transformer_encoder_block, multi_head_attention, feed_forward_with_layernorm, conv_mixer_block]
+  T3_models_core:
+    tier: core
+    status: unimplemented
+    items:
+      - {id: vnncomp_small_nets, source: "selection from VNN-COMP benchmark repos, pin exact files", note: "ties to the NN-verification community"}
+      - {id: squeezenet_1_1, params_approx: 1.2M, note: "also evaluated by mlir-tv"}
+      - {id: mobilenet_v2, params_approx: 3.5M, note: "mlir-tv evaluated a MobileNet; align version"}
+      - {id: text_classification_v2, note: "also evaluated by mlir-tv"}
+      - {id: resnet18, params_approx: 11.7M}
+      - {id: distilbert_or_tiny_bert, note: "domain after embedding; select one"}
+  T4_models_ambitious:
+    tier: extension
+    status: unimplemented
+    items:
+      - {id: resnet50, params_approx: 25.6M, note: "MLPerf Inference workload"}
+      - {id: vit_b_16, params_approx: 86.6M}
+      - {id: bert_large, note: "MLPerf Inference workload"}
+      - {id: llm_small_decoder, note: "one fixed length, no KV-cache variation at first"}
+      - {id: whisper_tiny_encoder}
+      - {id: quantized_mobilenet_v2_int8, note: "bit-vector exact path"}
+synthetic_scaling:
+  status: unimplemented
+  mlp: {depth: [2, 4, 8, 16, 32], width: [64, 256, 1024, 4096]}
+  resnet_like: {stages: [1, 2, 3, 4], blocks_per_stage: [1, 2, 4]}
+  transformer: {layers: [1, 2, 4, 8, 12], d_model: [64, 128, 256, 768]}
+  note: "same weights distribution so that depth and width effects stay separable"

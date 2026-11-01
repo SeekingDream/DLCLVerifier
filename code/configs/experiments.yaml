@@ -1,0 +1,26 @@
+# status: unimplemented unless noted. These are the frozen protocol, not results.
+schema_version: 1
+limits: {per_query_timeout_s: 3600, per_benchmark_timeout_s: 14400, memory_gb: 128, timing_repeats: 5}
+epsilon_grid:
+  binary32_abs: [1.0e-7, 1.0e-6, 1.0e-5, 1.0e-4, 1.0e-3, 1.0e-2]
+  binary64_abs: [1.0e-15, 1.0e-13, 1.0e-11, 1.0e-9]
+  rule: "report the certified minimum epsilon too, and declare application-derived epsilon before running"
+falsifier: {random_inputs: 100000, gradient_search_restarts: 64, boundary_corners: true, seeds: 5}
+experiments:
+  - {id: E1_coverage, rq: RQ1, tier: essential, status: unimplemented, matrix: "T0-T3 x core paths x D1,D3", report: [verified, refuted, inconclusive_by_cause, error]}
+  - {id: E2_tightness, rq: RQ2, tier: essential, status: unimplemented, matrix: "all verified cases", report: [eps_certified, eps_observed, tightness_ratio]}
+  - {id: E3_soundness, rq: RQ3, tier: essential, status: unimplemented, matrix: "falsifier, mutants, minifloat exhaustive, certificate replay", report: [violations, mutant_kill_matrix]}
+  - {id: E4_real_bugs, rq: RQ3, tier: essential, status: unimplemented, matrix: "refuted cases and flag variants", report: [root_cause, upstream_status]}
+  - {id: E5_scalability, rq: RQ4, tier: essential, status: unimplemented, matrix: "synthetic sweep and T3", report: [runtime, peak_rss, per_stage_breakdown]}
+  - {id: E6_baselines, rq: RQ5, tier: essential, status: unimplemented, matrix: "T0,T1 all compatible baselines; T2,T3 scalable ones", report: [same_as_E1_E2]}
+  - {id: E7_sensitivity, rq: RQ6, tier: important, status: unimplemented, matrix: "domain, precision, flags, threads, ISA", report: [eps_certified_delta, outcome_transitions]}
+  - {id: E8_ablation, rq: RQ7, tier: essential, status: unimplemented, matrix: "T1-T3 x A1-A7", report: [coverage_delta, tightness_delta, runtime_delta]}
+  - {id: E0_pilot, rq: none, tier: exploratory, status: pilot, matrix: "see pilot/run_pilot.py", report: [results/pilot/pilot_intel_macos.json]}
+ablations:
+  A1: "no relational analysis; triangle bound through a reference"
+  A2: "no correlation of shared subexpressions"
+  A3: "no tensor-level summarization; scalar expansion"
+  A4: "no order-agnostic reduction reasoning; one fixed tree"
+  A5: "no domain partitioning"
+  A6: "no falsifier guidance"
+  A7: "no local SMT or exact fallback"

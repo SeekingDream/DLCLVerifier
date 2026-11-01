@@ -1,0 +1,3 @@
+# Scaffold runtime and tests. Pilot pins are in pilot/requirements.lock.txt.
+PyYAML>=6
+pytest>=8

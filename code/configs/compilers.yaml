@@ -1,0 +1,97 @@
+# Compilation paths under evaluation.
+# status: implemented | pilot | unimplemented
+#   pilot = run through the exploratory harness only; there is NO verifier support.
+# Source facts were read on 2026-11-01 from main of openxla/xla @ f824cdd4dce2f2c0ce092fb7cfdc7ad1ebc92163
+# and pytorch/pytorch @ 7b6022cde65e330461c24e5a7a18919c5aec6310. Re-pin before the evaluation freeze.
+schema_version: 1
+paths:
+  - id: xla_cpu_default
+    tier: core
+    status: pilot
+    system: XLA via JAX
+    target: x86-64 CPU, AVX2+FMA pinned, then AVX-512
+    stages: [stablehlo, hlo_unoptimized, hlo_optimized, llvm_ir, native]
+    configuration:
+      xla_cpu_enable_fast_math: false       # default in source
+      xla_cpu_enable_fast_min_max: true     # default in source
+      xla_allow_excess_precision: true      # default in source
+      xla_cpu_use_xnnpack: true             # default in source
+      contract_flag_on_fadd_fsub_fmul: true # source says XLA:CPU relies on it for FMA
+    variants:
+      - {id: fast_math_on, XLA_FLAGS: "--xla_cpu_enable_fast_math=true"}
+      - {id: no_excess_precision, XLA_FLAGS: "--xla_allow_excess_precision=false"}
+      - {id: no_library_kernels, note: "exact YNN/XNN disable flags must be pinned per release"}
+    known_blockers:
+      - YNN/XNN library fusions on dot, convolution and reduce bypass LLVM IR analysis
+      - Native code below LLVM IR is in the trusted base unless a lifter is added
+  - id: ort_cpu_graph
+    tier: core
+    status: pilot
+    system: ONNX Runtime CPU execution provider
+    target: x86-64 CPU
+    stages: [onnx, onnx_optimized, mlas_kernels]
+    configuration: {levels: [ORT_DISABLE_ALL, ORT_ENABLE_BASIC, ORT_ENABLE_EXTENDED, ORT_ENABLE_ALL]}
+    known_blockers:
+      - Graph-level only in the core; MLAS kernels are axiomatized, not verified
+      - session.set_denormal_as_zero changed nothing in pilot P4; applicability is unresolved
+  - id: torch_inductor_cpu
+    tier: core_stretch
+    status: unimplemented
+    system: TorchInductor (torch.compile) CPU
+    target: x86-64 CPU
+    stages: [fx_graph, inductor_lir, generated_cpp, native]
+    configuration:
+      TORCHINDUCTOR_USE_FAST_MATH: "0"
+      TORCHINDUCTOR_CPP_ENABLE_UNSAFE_MATH_OPT_FLAG: "0"
+      TORCHINDUCTOR_CPP_ENABLE_FLOATING_POINT_CONTRACT_FLAG: "off"
+      TORCHINDUCTOR_DETERMINISTIC: "1"
+    variants:
+      - {id: contract_fast, TORCHINDUCTOR_CPP_ENABLE_FLOATING_POINT_CONTRACT_FLAG: fast}
+      - {id: unsafe_math, TORCHINDUCTOR_CPP_ENABLE_UNSAFE_MATH_OPT_FLAG: "1"}
+    known_blockers:
+      - C++ flag list is order-sensitive; capture the effective driver flags, do not infer them
+      - Generated C++ and vectorized kernels need a frontend into the analysis IR
+  - id: iree_llvm_cpu
+    tier: extension
+    status: unimplemented
+    system: IREE
+    target: llvm-cpu
+    stages: [stablehlo_or_torch_or_tosa, flow_stream_hal_mlir, llvm_ir, native]
+    configuration: {}
+    known_blockers:
+      - Pass-level configuration and any microkernel use must be read from the pinned release
+  - id: tensorrt_llm_gpu
+    tier: extension
+    status: unimplemented
+    system: TensorRT
+    target: NVIDIA GPU
+    stages: [torchscript_or_onnx, tensorrt_engine]
+    configuration: {}
+    known_blockers:
+      - Closed runtime; black-box differential evidence only, so VERIFIED is unreachable
+  - id: xla_gpu
+    tier: extension
+    status: unimplemented
+    system: XLA GPU / Inductor Triton
+    target: NVIDIA GPU
+    stages: [hlo_optimized, llvm_nvptx_or_ptx]
+    configuration: {}
+    known_blockers:
+      - cuBLAS and vendor math have no verified specification
+      - Vendor ULP tables come from testing, so treat them as assumptions
+  - id: openvino_cpu_f32
+    tier: extension
+    status: unimplemented
+    system: OpenVINO CPU plugin
+    target: x86-64 CPU
+    stages: [ir, compiled_model]
+    configuration: {EXECUTION_MODE_HINT: ACCURACY}
+    known_blockers: [JIT kernels are opaque to IR-level analysis]
+  - id: executorch_xnnpack
+    tier: extension
+    status: unimplemented
+    system: ExecuTorch or LiteRT with XNNPACK
+    target: Arm NEON
+    stages: [edge_dialect, delegate_graph, xnnpack_kernels]
+    configuration: {}
+    known_blockers: [Hand-written kernels need a binary-level or axiomatic story]
