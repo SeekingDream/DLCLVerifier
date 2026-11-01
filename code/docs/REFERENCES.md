@@ -34,7 +34,7 @@ came from the GitHub API. arXiv records are preprints and have not all been peer
 - Kellison et al. Bean: A Language for Backward Error Analysis. PLDI 2025. https://doi.org/10.1145/3729324
 - Gappa: https://gappa.gitlabpages.inria.fr/
 - PRECiSA: https://github.com/nasa/PRECiSA
-- Lohar et al. Rigorous Roundoff Error Analysis of Probabilistic Floating-Point Computations. CAV 2021. https://doi.org/10.1007/978-3-030-81688-9_29
+- Constantinides et al. Rigorous Roundoff Error Analysis of Probabilistic Floating-Point Computations. CAV 2021. https://doi.org/10.1007/978-3-030-81688-9_29
 - Tao et al. Probabilistic Floating-Point Round-Off Analysis via Concentration Inequalities. arXiv 2605.04232. https://arxiv.org/abs/2605.04232
 - Higham, Mary. A New Approach to Probabilistic Rounding Error Analysis. SISC 41(5), 2019. https://doi.org/10.1137/18M1226312
 - Panchekha et al. Automatically Improving Accuracy for Floating Point Expressions (Herbie). PLDI 2015. https://doi.org/10.1145/2737924.2737959
