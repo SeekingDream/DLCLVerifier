@@ -1,0 +1,16 @@
+# Datasets supply realistic centers and ranges for input domains. They do not make a result
+# distributional: a certificate covers only its declared domain.
+# status: unimplemented for all. Nothing has been downloaded. Pin revisions and hashes at freeze.
+schema_version: 1
+sampling: {per_model_samples: 100, stratified_by_label: true, seed: 20261031, note: "use held-out data only; count may shrink to fit the time limit, but fix it before running"}
+datasets:
+  - {id: mnist, kind: image, source: "VNN-COMP benchmark instances where available", status: unimplemented}
+  - {id: cifar10, kind: image, source: "VNN-COMP benchmark instances where available", status: unimplemented}
+  - {id: imagenet_val, kind: image, source: "ILSVRC 2012 validation; MLPerf ResNet-50 dataset", status: unimplemented, access: "registration and ImageNet terms required"}
+  - {id: imdb, kind: text, source: "https://huggingface.co/datasets/stanfordnlp/imdb", status: unimplemented, note: "IMDB attribution for text_classification_v2 rests on an IREE sample notebook"}
+  - {id: sst2, kind: text, source: "https://huggingface.co/datasets/stanfordnlp/sst2", status: unimplemented}
+  - {id: squad_1_1, kind: text, source: "https://huggingface.co/datasets/squad", status: unimplemented, note: "MLPerf BERT dataset"}
+  - {id: tinystories, kind: llm_prompts, source: "https://huggingface.co/datasets/roneneldan/TinyStories", status: unimplemented}
+  - {id: open_orca, kind: llm_prompts, source: "https://huggingface.co/datasets/Open-Orca/OpenOrca", status: unimplemented, note: "MLPerf llama2-70b dataset"}
+  - {id: cnn_dailymail, kind: llm_prompts, source: "MLPerf llama3.1-8b instructions", status: unimplemented}
+  - {id: librispeech, kind: audio, source: "MLPerf whisper instructions", status: unimplemented}

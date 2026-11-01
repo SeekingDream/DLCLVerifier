@@ -36,6 +36,20 @@ def validate():
             bad.append(f"baseline {b['id']}: bad guarantee")
         if b.get("integration") not in STATUS:
             bad.append(f"baseline {b['id']}: bad integration status")
+    data = {d["id"] for d in load("configs/datasets.yaml")["datasets"]}
+    for k, s in load("configs/benchmarks.yaml")["suites"].items():
+        for item in s.get("items", []):
+            if isinstance(item, dict):
+                for d in item.get("dataset", []):
+                    if d not in data:
+                        bad.append(f"{k}/{item['id']}: unknown dataset {d}")
+    for k in ("T3_models_core", "T4_models_ambitious"):
+        for item in load("configs/benchmarks.yaml")["suites"][k]["items"]:
+            if not item.get("dataset"):
+                bad.append(f"{k}/{item['id']}: no dataset")
+    for d in load("configs/datasets.yaml")["datasets"]:
+        if d.get("status") not in STATUS:
+            bad.append(f"dataset {d['id']}: bad status")
     exp = load("configs/experiments.yaml")
     abl = set(exp["ablations"])
     if abl != {f"A{i}" for i in range(1, 8)}:
@@ -52,6 +66,8 @@ def rows():
         yield "path", p["id"], p["status"]
     for k, s in load("configs/benchmarks.yaml")["suites"].items():
         yield "suite", k, s["status"]
+    for d in load("configs/datasets.yaml")["datasets"]:
+        yield "dataset", d["id"], d["status"]
     for b in load("baselines/registry.yaml")["baselines"]:
         yield "baseline", b["id"], b["integration"]
     for e in load("configs/experiments.yaml")["experiments"]:

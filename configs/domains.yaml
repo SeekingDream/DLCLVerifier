@@ -8,5 +8,6 @@ domains:
   - {id: D3_data_hull, kind: box, source: per-feature min/max over the training set, note: "not a proof about unseen data outside the hull"}
   - {id: D4_global_valid, kind: box, source: documented valid range, note: "expected to be vacuous at model scale"}
   - {id: D5_token_ids, kind: finite_integer_vector, source: vocabulary range and fixed sequence length, note: "sequences must be enumerated or embedded into a box after the embedding lookup"}
+  - {id: D6_embedding_ball, kind: linf_ball, radius: "declared per model, relative to embedding scale", space: token embeddings, note: "LLM and transformer domain; covers perturbed embeddings, not all token sequences"}
 subnormal_inputs: included   # one sensitivity run excludes them
 sampling_is_not_verification: true

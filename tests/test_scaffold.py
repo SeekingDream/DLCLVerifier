@@ -85,3 +85,14 @@ def test_real_semantics_tools_cannot_verify_fp_at_all():
     assert tools["alpha_beta_crown"] == "formal_real_semantics"
     with pytest.raises(ValueError):
         check_result(ok(guarantee="formal_real_semantics", epsilon=F(0), certified_bound=F(0)))
+
+
+def test_every_model_has_known_dataset(monkeypatch):
+    real = config.load
+    def broken(rel):
+        d = real(rel)
+        if rel.endswith("benchmarks.yaml"):
+            d["suites"]["T3_models_core"]["items"][0]["dataset"] = ["missing"]
+        return d
+    monkeypatch.setattr(config, "load", broken)
+    assert any("unknown dataset" in p for p in config.validate())

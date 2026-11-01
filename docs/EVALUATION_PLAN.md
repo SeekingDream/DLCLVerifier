@@ -85,9 +85,12 @@ credible extension, but only after the artifact is located and tested.
 | **T0 operators** | 24 operators, including dot, reductions, conv, softmax, norms, casts | Semantics, soundness anchors | Reduction order, math functions | Core, days |
 | **T1 fused kernels** | 12 rewrites, including FMA, reassociation, Conv+BN, Gemm, attention, polynomial math | Pass-level claims | Constant folding, cancellation | Core, about 1–2 weeks |
 | **T2 components** | ResNet block, inverted residual, MHA, encoder block | Composition | Skip connections, non-Lipschitz cancellation | Core, depends on T1 |
-| **T3 models** | VNN-COMP small nets, SqueezeNet, MobileNetV2, text_classification_v2, ResNet-18, one small transformer | Real workload evidence | 10⁶–10⁷ parameters | Core; ResNet-18 and transformer are the gate |
-| **T4 ambitious** | ResNet-50, ViT-B/16, BERT-large, small LLM decoder, Whisper tiny, int8 MobileNetV2 | Headline scale | 10⁷–10⁸ parameters | Extension |
+| **T3 models** | VNN-COMP small nets, SqueezeNet, MobileNetV2, text_classification_v2, ResNet-18, all-MiniLM-L6-v2 | Real workload evidence | Up to about 2×10⁷ parameters | Core; ResNet-18 and MiniLM are the gate |
+| **T4 ambitious** | ResNet-50, Whisper tiny, DistilBERT, ViT-B/16, BERT-large, int8 MobileNetV2; LLMs: SmolLM2-135M, GPT-2, Qwen3-0.6B, Llama 3.2 1B, Llama 3.1 8B | Headline scale | 10⁷–10⁹ parameters | Extension; LLM scope is one fixed-length forward pass |
 | **Synthetic** | Depth and width sweeps | Separate growth rates | Controlled | Core |
+
+Datasets are in `configs/datasets.yaml`. A SmolLM2 decoder block is in T2, so the core still has
+an LLM component if no full LLM finishes.
 
 Why these are representative:
 
@@ -146,7 +149,7 @@ TAO-style thresholds. See `baselines/INTEGRATION_PLAN.md`.
 | Nov 2–8 | Spec freeze; `R_ieee`; exact-rational replay; extract XLA and ORT pairs; T0 | Replay computes exact distance for T0 on both paths |
 | Nov 9–15 | Relational analyzer for dot, reduction, conv; certificate checker; T1 | **Gate below** |
 | Nov 16–22 | T2; falsifier; mutation suite; baselines 1–4 | No violations; mutants classified |
-| Nov 23–29 | T3 and scale sweep; remaining baselines; abstract and first pages | ResNet-18 or transformer attempt finished, either way |
+| Nov 23–29 | T3 and scale sweep; remaining baselines; abstract and first pages | ResNet-18 or MiniLM attempt finished, either way |
 | Nov 30–Dec 3 | Abstract Dec 1; final reruns; artifact freeze Dec 3 | All tables produced by script |
 | Dec 4–8 | Paper, figures, threats to validity | Submit Dec 8 |
 
