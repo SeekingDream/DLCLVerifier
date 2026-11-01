@@ -6,31 +6,38 @@
 #   formal_bounded     proof only up to stated shape, unrolling or other bounds
 #   probabilistic      holds with stated probability under stated model assumptions
 #   empirical          evidence from executions only
+# role: main (must beat), gap (shows what others cannot answer), context, out_of_scope.
+#   Scope is differences caused by reordering floating-point additions. out_of_scope entries
+#   are kept in case the scope widens; they are not part of the current evaluation.
 # integration: unimplemented for all entries. "pilot" means a local trial only.
 schema_version: 1
 baselines:
-  - {id: fptaylor, family: numerical, guarantee: formal, integration: unimplemented, repo: "https://github.com/soarlab/FPTaylor", last_push: 2024-09-01, license: MIT, tier: must}
-  - {id: gappa, family: numerical, guarantee: formal, integration: unimplemented, repo: "https://gappa.gitlabpages.inria.fr/", license: "check at pin", tier: must}
-  - {id: daisy, family: numerical, guarantee: formal, integration: unimplemented, repo: "https://github.com/malyzajko/daisy", last_push: 2026-09-03, license: Apache-2.0, tier: must}
-  - {id: satire, family: numerical, guarantee: formal_first_order, integration: unimplemented, repo: "https://github.com/arnabd88/Satire", last_push: 2025-07-23, license: MIT, tier: must}
-  - {id: numfuzz, family: numerical, guarantee: formal, integration: unimplemented, repo: "https://github.com/Athena-Types/NumFuzz", last_push: 2025-11-21, license: GPL-3.0, tier: should, caveat: "positive reals, no overflow or underflow per paper summary"}
-  - {id: bean, family: numerical, guarantee: formal, integration: unimplemented, repo: null, tier: optional, caveat: "backward error; no public artifact located"}
-  - {id: precisa, family: numerical, guarantee: formal, integration: unimplemented, repo: "https://github.com/nasa/PRECiSA", last_push: 2026-09-24, license: "see repo", tier: optional}
-  - {id: alive2, family: translation_validation, guarantee: formal_bounded, integration: unimplemented, repo: "https://github.com/AliveToolkit/alive2", last_push: 2026-10-26, license: MIT, tier: must}
-  - {id: mlir_tv, family: translation_validation, guarantee: formal_equality, integration: unimplemented, repo: "https://github.com/aqjune/mlir-tv", last_push: 2025-03-19, license: Apache-2.0, tier: must, caveat: "port to pinned MLIR may be large"}
-  - {id: tensorright, family: translation_validation, guarantee: formal_equality, integration: unimplemented, repo: "https://github.com/ADAPT-uiuc/TensorRight", last_push: 2026-10-03, license: Apache-2.0, tier: should}
-  - {id: volta, family: translation_validation, guarantee: formal_equality, integration: unimplemented, repo: "https://github.com/willtunnels/volta", last_push: 2026-10-28, license: MIT, tier: should, caveat: "real-valued model; PTX"}
-  - {id: arm_tv, family: translation_validation, guarantee: formal_bounded, integration: unimplemented, repo: null, tier: optional, caveat: "AArch64 only; locate artifact"}
-  - {id: z3_bitprecise, family: translation_validation, guarantee: formal, integration: pilot, repo: "https://github.com/Z3Prover/z3", tier: must}
-  - {id: alpha_beta_crown, family: nn_verification, guarantee: formal_real_semantics, integration: unimplemented, repo: "https://github.com/Verified-Intelligence/alpha-beta-CROWN", last_push: 2026-10-10, license: "see repo", tier: must, caveat: "sound for real semantics, not FP semantics, unless rounding is modeled"}
-  - {id: reludiff_neurodiff, family: nn_verification, guarantee: formal_real_semantics, integration: unimplemented, repo: null, tier: should, caveat: "real semantics; artifact not yet located"}
-  - {id: marabou, family: nn_verification, guarantee: formal_real_semantics, integration: unimplemented, repo: "https://github.com/NeuralNetworkVerification/Marabou", last_push: 2026-09-18, license: "see repo", tier: optional}
-  - {id: nnsmith, family: testing, guarantee: empirical, integration: unimplemented, repo: "https://github.com/ise-uiuc/nnsmith", last_push: 2025-01-14, license: Apache-2.0, tier: must}
-  - {id: whitefox, family: testing, guarantee: empirical, integration: unimplemented, repo: "https://github.com/ise-uiuc/WhiteFox", last_push: 2025-08-05, license: Apache-2.0, tier: should}
-  - {id: mlirsmith, family: testing, guarantee: empirical, integration: unimplemented, repo: null, tier: optional, caveat: "locate artifact"}
-  - {id: flit, family: testing, guarantee: empirical, integration: unimplemented, repo: "https://github.com/PRUNERS/FLiT", last_push: 2024-11-14, license: "see repo", tier: optional}
-  - {id: verificarlo, family: testing, guarantee: empirical, integration: unimplemented, repo: "https://github.com/verificarlo/verificarlo", last_push: 2026-10-15, license: "see repo", tier: optional}
-  - {id: tao_thresholds, family: tolerance, guarantee: empirical, integration: unimplemented, repo: null, tier: should, caveat: "theory bound is per-operator; empirical profile is what scales; no code located"}
-  - {id: higham_mary, family: tolerance, guarantee: probabilistic, integration: unimplemented, repo: null, tier: should, caveat: "reimplement; mean-zero independence assumptions"}
-  - {id: torchlean, family: proof_assistant, guarantee: formal_bounded, integration: unimplemented, repo: "https://github.com/lean-dojo/TorchLean", last_push: 2026-10-29, license: MIT, tier: optional, caveat: "no torch.compile-style optimization correctness"}
-  - {id: vcfloat_laproof, family: proof_assistant, guarantee: formal, integration: unimplemented, repo: "https://github.com/VeriNum/vcfloat", last_push: 2026-09-23, license: LGPL-3.0, tier: optional}
+  - {id: tree_depth_bound, role: main, family: closed_form, guarantee: formal, integration: unimplemented, repo: null, tier: must, caveat: "Higham 1993 style bound per tree plus triangle inequality; reimplement with exact rational arithmetic"}
+  - {id: order_agnostic_bound, role: main, family: closed_form, guarantee: formal, integration: unimplemented, repo: null, tier: must, caveat: "(n-1)u sum|x_i| and Rump-style variants; use when the order is unknown"}
+  - {id: random_order_testing, role: main, family: testing, guarantee: empirical, integration: unimplemented, repo: null, tier: must, caveat: "samples orders and inputs; gives only the observed lower bound"}
+  - {id: sardana_apeg, role: context, family: numerical, guarantee: formal, integration: unimplemented, repo: null, tier: should, caveat: "represents many parenthesizations but seeks the most accurate one; no bound between two orders; no artifact located"}
+  - {id: fptaylor, role: main, family: numerical, guarantee: formal, integration: unimplemented, repo: "https://github.com/soarlab/FPTaylor", last_push: 2024-09-01, license: MIT, tier: must}
+  - {id: gappa, role: main, family: numerical, guarantee: formal, integration: unimplemented, repo: "https://gappa.gitlabpages.inria.fr/", license: "check at pin", tier: must}
+  - {id: daisy, role: main, family: numerical, guarantee: formal, integration: unimplemented, repo: "https://github.com/malyzajko/daisy", last_push: 2026-09-03, license: Apache-2.0, tier: must}
+  - {id: satire, role: main, family: numerical, guarantee: formal_first_order, integration: unimplemented, repo: "https://github.com/arnabd88/Satire", last_push: 2025-07-23, license: MIT, tier: must}
+  - {id: numfuzz, role: context, family: numerical, guarantee: formal, integration: unimplemented, repo: "https://github.com/Athena-Types/NumFuzz", last_push: 2025-11-21, license: GPL-3.0, tier: should, caveat: "positive reals, no overflow or underflow per paper summary"}
+  - {id: bean, role: out_of_scope, family: numerical, guarantee: formal, integration: unimplemented, repo: null, tier: dropped, caveat: "backward error; no public artifact located"}
+  - {id: precisa, role: context, family: numerical, guarantee: formal, integration: unimplemented, repo: "https://github.com/nasa/PRECiSA", last_push: 2026-09-24, license: "see repo", tier: optional}
+  - {id: alive2, role: gap, family: translation_validation, guarantee: formal_bounded, integration: unimplemented, repo: "https://github.com/AliveToolkit/alive2", last_push: 2026-10-26, license: MIT, tier: must, caveat: "reassoc is an approximated uninterpreted function; associativity in its e-graph is a TODO in current source"}
+  - {id: mlir_tv, role: gap, family: translation_validation, guarantee: formal_equality, integration: unimplemented, repo: "https://github.com/aqjune/mlir-tv", last_push: 2025-03-19, license: Apache-2.0, tier: must, caveat: "abstracts reductions as uninterpreted functions; port to pinned MLIR may be large"}
+  - {id: tensorright, role: out_of_scope, family: translation_validation, guarantee: formal_equality, integration: unimplemented, repo: "https://github.com/ADAPT-uiuc/TensorRight", last_push: 2026-10-03, license: Apache-2.0, tier: dropped}
+  - {id: volta, role: out_of_scope, family: translation_validation, guarantee: formal_equality, integration: unimplemented, repo: "https://github.com/willtunnels/volta", last_push: 2026-10-28, license: MIT, tier: dropped, caveat: "real-valued model; PTX"}
+  - {id: arm_tv, role: out_of_scope, family: translation_validation, guarantee: formal_bounded, integration: unimplemented, repo: null, tier: dropped, caveat: "AArch64 only; locate artifact"}
+  - {id: z3_bitprecise, role: main, family: translation_validation, guarantee: formal, integration: pilot, repo: "https://github.com/Z3Prover/z3", tier: must}
+  - {id: alpha_beta_crown, role: out_of_scope, family: nn_verification, guarantee: formal_real_semantics, integration: unimplemented, repo: "https://github.com/Verified-Intelligence/alpha-beta-CROWN", last_push: 2026-10-10, license: "see repo", tier: dropped, caveat: "sound for real semantics, not FP semantics, unless rounding is modeled"}
+  - {id: reludiff_neurodiff, role: out_of_scope, family: nn_verification, guarantee: formal_real_semantics, integration: unimplemented, repo: null, tier: dropped, caveat: "real semantics; artifact not yet located"}
+  - {id: marabou, role: out_of_scope, family: nn_verification, guarantee: formal_real_semantics, integration: unimplemented, repo: "https://github.com/NeuralNetworkVerification/Marabou", last_push: 2026-09-18, license: "see repo", tier: dropped}
+  - {id: nnsmith, role: out_of_scope, family: testing, guarantee: empirical, integration: unimplemented, repo: "https://github.com/ise-uiuc/nnsmith", last_push: 2025-01-14, license: Apache-2.0, tier: dropped}
+  - {id: whitefox, role: out_of_scope, family: testing, guarantee: empirical, integration: unimplemented, repo: "https://github.com/ise-uiuc/WhiteFox", last_push: 2025-08-05, license: Apache-2.0, tier: dropped}
+  - {id: mlirsmith, role: out_of_scope, family: testing, guarantee: empirical, integration: unimplemented, repo: null, tier: dropped, caveat: "locate artifact"}
+  - {id: flit, role: context, family: testing, guarantee: empirical, integration: unimplemented, repo: "https://github.com/PRUNERS/FLiT", last_push: 2024-11-14, license: "see repo", tier: optional}
+  - {id: verificarlo, role: context, family: testing, guarantee: empirical, integration: unimplemented, repo: "https://github.com/verificarlo/verificarlo", last_push: 2026-10-15, license: "see repo", tier: optional}
+  - {id: tao_thresholds, role: context, family: tolerance, guarantee: empirical, integration: unimplemented, repo: null, tier: should, caveat: "theory bound is per-operator; empirical profile is what scales; no code located"}
+  - {id: higham_mary, role: context, family: tolerance, guarantee: probabilistic, integration: unimplemented, repo: null, tier: should, caveat: "reimplement; mean-zero independence assumptions"}
+  - {id: torchlean, role: out_of_scope, family: proof_assistant, guarantee: formal_bounded, integration: unimplemented, repo: "https://github.com/lean-dojo/TorchLean", last_push: 2026-10-29, license: MIT, tier: dropped, caveat: "no torch.compile-style optimization correctness"}
+  - {id: vcfloat_laproof, role: context, family: proof_assistant, guarantee: formal, integration: unimplemented, repo: "https://github.com/VeriNum/vcfloat", last_push: 2026-09-23, license: LGPL-3.0, tier: optional}

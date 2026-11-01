@@ -3,6 +3,37 @@
 Status: plan only. Pilot numbers are exploratory (`PILOT_RESULTS.md`). Citations are in
 `REFERENCES.md`. Facts about XLA and Inductor come from `main` on 2026-11-01 and need re-pinning.
 
+## Scope
+
+**This plan targets differences caused by non-associativity of floating-point addition**, such as
+`(a+b)+c ≠ a+(b+c)`. Where this section conflicts with text below, this section wins.
+
+Main baseline: the tree-depth bound for each order, combined by the triangle inequality:
+
+```
+|ŝ_T − s| ≤ Σ γ(d_i)·|x_i|          d_i = additions above term i, γ(k) = ku/(1 − ku)
+|ŝ_T₁ − ŝ_T₂| ≤ Σ [γ(d_i) + γ(d′_i)]·|x_i|
+```
+
+For `(a+b)+c` versus `a+(b+c)`, this gives `u(3|a| + 4|b| + 3|c|)` to first order. On the pilot's
+10⁶ values, it gives about 1.9 for two depth-20 balanced trees, against 0.0011 observed for the
+non-sequential systems (whose true trees are unconfirmed), and about 2.4×10⁴ for sequential versus
+balanced, against 0.051 observed. Observed values are lower bounds on the true worst case.
+
+The gap to target: identical subtrees give identical floating-point values, so their error cancels
+exactly, while the triangle bound treats the orders as unrelated. Whether FPTaylor and Daisy lose
+this correlation on `T₁ − T₂` must be tested before it is claimed.
+
+| Role | Baselines |
+|---|---|
+| **Main, must beat** | Tree-depth bound, order-agnostic bound, FPTaylor, Gappa, Daisy, Satire, bit-precise SMT, random order testing (lower bound only) |
+| **Shows the gap** | Alive2, mlir-tv |
+| **Context** | APEG/Sardana, Higham–Mary, NumFuzz, PRECiSA, VCFloat/LAProof, FLiT, Verificarlo, TAO thresholds |
+| **Out of scope** | α,β-CROWN, ReluDiff, Marabou, NNSmith, WhiteFox, MLIRSmith, Volta, TensorRight, TorchLean, Bean, arm-tv |
+
+Benchmarks with other effects move to `T1x_other_rewrites`. Results must not attribute a difference
+to order unless other effects are off or pinned.
+
 ## 0. Constraints that shape everything
 
 **Deadline.** OSDI '27 abstracts are due December 1, 2026 and papers December 8, 2026, 5:59 pm EST.
@@ -82,8 +113,8 @@ credible extension, but only after the artifact is located and tested.
 
 | Tier | Contents | Purpose | Stress | Feasibility |
 |---|---|---|---|---|
-| **T0 operators** | 24 operators, including dot, reductions, conv, softmax, norms, casts | Semantics, soundness anchors | Reduction order, math functions | Core, days |
-| **T1 fused kernels** | 12 rewrites, including FMA, reassociation, Conv+BN, Gemm, attention, polynomial math | Pass-level claims | Constant folding, cancellation | Core, about 1–2 weeks |
+| **T0 operators** | 13 accumulating operators, including sum, dot, matmul, conv, softmax, norms | Semantics, soundness anchors | Reduction order, math functions | Core, days |
+| **T1 reordering kernels** | 12 order pairs, including associativity, vectorized and thread-partitioned sums, dot, matmul, conv, attention | Pass-level claims | Constant folding, cancellation | Core, about 1–2 weeks |
 | **T2 components** | ResNet block, inverted residual, MHA, encoder block | Composition | Skip connections, non-Lipschitz cancellation | Core, depends on T1 |
 | **T3 models** | VNN-COMP small nets, SqueezeNet, MobileNetV2, text_classification_v2, ResNet-18, all-MiniLM-L6-v2 | Real workload evidence | Up to about 2×10⁷ parameters | Core; ResNet-18 and MiniLM are the gate |
 | **T4 ambitious** | ResNet-50, Whisper tiny, DistilBERT, ViT-B/16, BERT-large, int8 MobileNetV2; LLMs: SmolLM2-135M, GPT-2, Qwen3-0.6B, Llama 3.2 1B, Llama 3.1 8B | Headline scale | 10⁷–10⁹ parameters | Extension; LLM scope is one fixed-length forward pass |
@@ -138,9 +169,8 @@ Guarantee classes are defined in `baselines/registry.yaml` and enforced by `chec
 | Higham–Mary | SISC 2019 | Reimplement | **Probabilistic** | Formula-based | Mean-zero independence model |
 | TorchLean, VCFloat, LAProof | 2026 preprint; repos | MIT, LGPL, MIT | **Machine-checked, fragments** | Cross-check small lemmas | Not compiler optimization correctness |
 
-Must-have set for the paper: FPTaylor or Gappa, Satire, Daisy, Alive2, mlir-tv or published-data
-comparison, bit-precise SMT, α,β-CROWN difference graph, NNSmith with `ε` oracle, Higham–Mary or
-TAO-style thresholds. See `baselines/INTEGRATION_PLAN.md`.
+Must-have set for the paper: the "Main" row in the Scope section, plus Alive2 and mlir-tv to show
+what equivalence tools cannot answer. See `baselines/INTEGRATION_PLAN.md`.
 
 ## 5. Implementation order and gates
 

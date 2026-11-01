@@ -5,24 +5,30 @@ suites:
   T0_operators:
     tier: core
     status: unimplemented
-    items: [add_mul_fma, dot, sum_reduce, mean_reduce, matmul, conv2d, depthwise_conv2d, avg_pool, relu, leaky_relu, gelu, sigmoid, tanh, exp, log, sqrt, softmax, log_softmax, batch_norm_inference, layer_norm, group_norm, cast_f32_f16, cast_f32_bf16, resize_bilinear]
+    items: [add, sum_reduce, mean_reduce, dot, matmul, conv2d, depthwise_conv2d, avg_pool, softmax, log_softmax, layer_norm, group_norm, batch_norm_inference]
     shapes: "fixed; sweep n in 2^3..2^20 for reductions"
-  T1_fused_kernels:
+  T1_reordering_kernels:
+    # Same operands, different addition trees, one per pair. Multiplications stay fixed.
     tier: core
     status: unimplemented
     items:
-      - {id: fma_contraction, source_rewrite: "a*b+c -> fma"}
-      - {id: sum_reassociation, source_rewrite: "sequential -> pairwise/vectorized/thread-partitioned"}
-      - {id: conv_bn_fusion, source_rewrite: "Conv+BatchNorm -> Conv with merged constants", status: pilot}
-      - {id: matmul_add_to_gemm, source_rewrite: "MatMul+Add -> Gemm/FusedMatMul"}
-      - {id: conv_add_fusion, source_rewrite: "Conv+Add/Mul constant folding"}
-      - {id: transpose_elision, source_rewrite: "layout changes around conv and dot"}
-      - {id: dot_strength_reduction, source_rewrite: "XLA algebraic simplifier dot rewrites"}
-      - {id: div_to_reciprocal_mul, source_rewrite: "x/c -> x*(1/c), fast-math variant"}
-      - {id: softmax_decomposition, source_rewrite: "softmax -> exp(x-max)/sum"}
-      - {id: scaled_dot_product_attention, source_rewrite: "attention fusion"}
-      - {id: mixed_precision_folding, source_rewrite: "f32->bf16->f32 removal under excess precision"}
-      - {id: polynomial_tanh_exp, source_rewrite: "libm call -> inline polynomial approximation"}
+      - {id: three_term_associativity, pair: "(a+b)+c vs a+(b+c)"}
+      - {id: sum_sequential_vs_pairwise, pair: "sequential vs balanced tree", status: pilot}
+      - {id: sum_vectorized, pair: "scalar vs SIMD-width lanes then horizontal add"}
+      - {id: sum_thread_partitioned, pair: "partition at 1, 2, 4, 8 threads", status: pilot}
+      - {id: mean_reduce, pair: "sum order under a mean"}
+      - {id: dot_product, pair: "accumulation order over fixed products"}
+      - {id: matmul_loop_order, pair: "ijk vs ikj vs blocked accumulation"}
+      - {id: conv2d_accumulation, pair: "kernel accumulation order"}
+      - {id: softmax_denominator, pair: "order in the exp sum"}
+      - {id: layer_norm_stats, pair: "order in mean and variance sums"}
+      - {id: attention_weighted_sum, pair: "order in weighted value sum"}
+      - {id: fast_math_reassoc, pair: "llvm reassoc flag before and after optimization"}
+  T1x_other_rewrites:
+    # Kept for a wider scope. These change values for reasons other than addition order.
+    tier: out_of_scope
+    status: unimplemented
+    items: [fma_contraction, conv_bn_fusion, matmul_add_to_gemm, conv_add_fusion, div_to_reciprocal_mul, mixed_precision_folding, polynomial_tanh_exp]
   T2_components:
     tier: core
     status: unimplemented

@@ -24,21 +24,22 @@ FPTaylor, Gappa, Daisy, Satire and NumFuzz bound `|P_float(x) − P_real(x)|`. T
 2. **Difference expression**: analyze `M − C` as one expression where the tool's input language
    allows it. This helps only if the tool correlates shared variables.
 
-Report which one was used. The real-equivalence step can use Volta-style or TensorRight-style
-reasoning. Without it, the triangle bound is unsupported.
+Report which one was used. For an in-scope pair, real equality follows from both trees adding the
+same operands, which the frontend must check.
 
 ## Order of work
 
+Scope is addition reordering. Entries with `role: out_of_scope` are not scheduled.
+
 | Order | Baseline | Work | Expected blocker |
 |---|---|---|---|
-| 1 | FPTaylor, Gappa, Daisy | Emit FPCore or tool input from T0/T1 scalar expansion | Hundreds of operators may be the practical limit |
-| 2 | Satire | Same expansion, straight-line code | First-order only, reduction fan-in |
-| 3 | z3 bit-precise | Promote pilot P6 to a runner, add cvc5 | Timeouts, per P6 |
-| 4 | Alive2 | Lower pairs to LLVM IR, compare exact refinement | No `ε` query; expected failure on any rounding change is the point of the comparison |
-| 5 | mlir-tv | Pin its required MLIR and solver; convert benchmarks to supported ops | Port effort; if over 3 days, cite published results instead and say so |
-| 6 | α,β-CROWN | Build `M − C` difference graph, add rounding as an interval perturbation | Models real semantics unless rounding is injected |
-| 7 | NNSmith | Generate graphs for core paths, compare outputs | Add an `ε` oracle |
-| 8 | TAO-style thresholds, Higham–Mary | Reimplement per-operator bounds and profiles | TAO has no located code; state "our reimplementation" |
-| 9 | Optional tools | Only after the must tier is complete | |
+| 1 | Tree-depth and order-agnostic bounds | Extract both trees; compute `Σ[γ(d_i)+γ(d′_i)]|x_i|` in exact rational arithmetic over the domain | Trees hidden inside kernels |
+| 2 | Random order testing | Sample orders and inputs; replay exactly | Lower bound only |
+| 3 | FPTaylor, Gappa, Daisy | Per-order bounds, then `T₁ − T₂` as one expression | Hundreds of operators may be the limit |
+| 4 | Satire | Same, straight-line expansion | First-order only |
+| 5 | z3, cvc5 | Promote pilot P6 to a runner | Timeouts, per P6 |
+| 6 | Alive2 | Run on LLVM `reassoc` pairs | No `ε` query; associativity not modeled in its e-graph |
+| 7 | mlir-tv | Pin required MLIR and solver; run reductions | Port effort; if over 3 days, cite published results and say so |
+| 8 | Context tools | Only after the above | |
 
 Do not report numbers from any baseline's paper as if they were produced on this benchmark set.

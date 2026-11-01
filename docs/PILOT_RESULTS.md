@@ -19,6 +19,12 @@ naive bounds use float64 without outward rounding, so they are estimates, not ce
 | P5 | Do threads matter? | ORT MLP: no change across 1, 2, 4, 8 threads or 5 repeats. `torch.sum` on 5M floats: a different value at each of 1, 2, 4, 8 threads, spread 9.8e-4, stable across repeats. | Thread count is part of the semantics for reductions. Here it behaved as a deterministic function of the partition. |
 | P6 | Is bit-precise SMT viable? | z3, 90 s limit, `[-1,1]` inputs. `fma(a,b,c)` vs `(a*b)+c`: refuted at 2⁻²⁵ in 8 s, **unknown** at 2⁻²². 4-term reassociation: refuted at 2⁻²⁶ in 14 s, **unknown** at 2⁻²⁰. | Tight refutation works. Proving even one 3-input site timed out. SMT is a local tool at best. |
 
+## Relevance to the reassociation scope
+
+P1 and P5 measure addition order directly. P2 may include accumulation-order effects, but kernel
+differences were not isolated. P3 is out of scope, since it changes constants. P6's FMA query is
+out of scope; its 4-term query is in scope.
+
 ## Limits of the pilot
 
 - One machine, one model per experiment, random weights.

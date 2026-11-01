@@ -26,6 +26,12 @@ came from the GitHub API. arXiv records are preprints and have not all been peer
 - Wang et al. PET. OSDI 2021. https://www.usenix.org/conference/osdi21/presentation/wang
 - Zheng et al. EinNet. OSDI 2023. https://www.usenix.org/conference/osdi23/presentation/zheng
 
+## Reassociation
+- Higham. The Accuracy of Floating Point Summation. SISC 14(4), 1993. https://doi.org/10.1137/0914050
+- Rump. Error Estimation of Floating-Point Summation and Dot Product. https://www.tuhh.de/ti3/paper/rump/Ru11.pdf
+- Ioualalen, Martel. A New Abstract Domain for the Representation of Mathematically Equivalent Expressions. https://hal.archives-ouvertes.fr/hal-00698618
+- Alive2 `reassoc` handling: https://github.com/AliveToolkit/alive2/blob/master/ir/fast_math.cpp and https://github.com/AliveToolkit/alive2/blob/master/ir/instr.cpp
+
 ## Numerical error analysis
 - Solovyev et al. Rigorous Estimation of Floating-Point Round-Off Errors with Symbolic Taylor Expansions (FPTaylor). TOPLAS 41, 2018. https://doi.org/10.1145/3230733
 - Darulova et al. Daisy. TACAS 2018. https://doi.org/10.1007/978-3-319-89960-2_15

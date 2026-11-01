@@ -4,6 +4,19 @@ Evaluation plan and scaffold for formally verifying numerical consistency betwee
 its compiled form. **The verifier does not exist yet.** This repository has no verification
 results.
 
+## Scope
+
+The target is the numerical difference caused by **non-associativity of floating-point addition**,
+such as `(a+b)+c ≠ a+(b+c)`: the same operands added in a different order by a compiler, vectorizer
+or thread partition. FMA contraction, precision changes, merged constants and elementary-function
+replacement are out of scope. See `docs/SPECIFICATION.md`.
+
+The bound to beat is the tree-depth bound for both orders, combined by the triangle inequality:
+
+```
+|ŝ_T₁ − ŝ_T₂| ≤ Σ [γ(d_i) + γ(d′_i)]·|x_i|     γ(k) = ku/(1 − ku)
+```
+
 ## Status
 
 | Component | Status |
@@ -54,7 +67,7 @@ The core suite includes a SmolLM2 decoder block (T2). All full LLMs are ambitiou
 | `llama_3_2_1b` | Ambitious | 1.24B | `open_orca` | [link](https://huggingface.co/meta-llama/Llama-3.2-1B) |
 | `llama_3_1_8b` | Ambitious | 8B | `cnn_dailymail` | MLPerf llama3.1-8b |
 
-Gated models need license acceptance. Operators (T0), fused kernels (T1), components (T2) and synthetic sweeps are in `configs/benchmarks.yaml`.
+Gated models need license acceptance. Operators (T0), reordering kernels (T1), components (T2) and synthetic sweeps are in `configs/benchmarks.yaml`.
 
 ## Compilers
 
@@ -94,33 +107,40 @@ No dataset has been downloaded. Datasets give realistic centers and ranges for i
 
 The only baseline run so far is the z3 trial in the pilot. All adapters are unimplemented; see `baselines/INTEGRATION_PLAN.md`.
 
-| Baseline | Family | Evidence | Priority | Repository |
-|---|---|---|---|---|
-| FPTaylor | Numerical error analysis | Formal bound | must | [link](https://github.com/soarlab/FPTaylor) |
-| Gappa | Numerical error analysis | Formal bound | must | [link](https://gappa.gitlabpages.inria.fr/) |
-| Daisy | Numerical error analysis | Formal bound | must | [link](https://github.com/malyzajko/daisy) |
-| Satire | Numerical error analysis | Formal, first-order | must | [link](https://github.com/arnabd88/Satire) |
-| NumFuzz | Numerical error analysis | Formal bound | should | [link](https://github.com/Athena-Types/NumFuzz) |
-| Bean | Numerical error analysis | Formal bound | optional | Not located |
-| PRECiSA | Numerical error analysis | Formal bound | optional | [link](https://github.com/nasa/PRECiSA) |
-| Alive2 | Translation validation | Formal, bounded | must | [link](https://github.com/AliveToolkit/alive2) |
-| mlir-tv | Translation validation | Formal equivalence, no ε | must | [link](https://github.com/aqjune/mlir-tv) |
-| TensorRight | Translation validation | Formal equivalence, no ε | should | [link](https://github.com/ADAPT-uiuc/TensorRight) |
-| Volta | Translation validation | Formal equivalence, no ε | should | [link](https://github.com/willtunnels/volta) |
-| arm-tv | Translation validation | Formal, bounded | optional | Not located |
-| z3 bit-precise | Translation validation | Formal bound | must | [link](https://github.com/Z3Prover/z3) |
-| α,β-CROWN | NN verification | Formal for real arithmetic only | must | [link](https://github.com/Verified-Intelligence/alpha-beta-CROWN) |
-| ReluDiff / NeuroDiff | NN verification | Formal for real arithmetic only | should | Not located |
-| Marabou | NN verification | Formal for real arithmetic only | optional | [link](https://github.com/NeuralNetworkVerification/Marabou) |
-| NNSmith | Testing | Empirical | must | [link](https://github.com/ise-uiuc/nnsmith) |
-| WhiteFox | Testing | Empirical | should | [link](https://github.com/ise-uiuc/WhiteFox) |
-| MLIRSmith | Testing | Empirical | optional | Not located |
-| FLiT | Testing | Empirical | optional | [link](https://github.com/PRUNERS/FLiT) |
-| Verificarlo | Testing | Empirical | optional | [link](https://github.com/verificarlo/verificarlo) |
-| TAO thresholds | Tolerance model | Empirical | should | Not located |
-| Higham–Mary | Tolerance model | Probabilistic | should | Not located |
-| TorchLean | Proof assistant | Formal, bounded | optional | [link](https://github.com/lean-dojo/TorchLean) |
-| VCFloat / LAProof | Proof assistant | Formal bound | optional | [link](https://github.com/VeriNum/vcfloat) |
+### Main: must beat
+
+| Baseline | Evidence | Repository |
+|---|---|---|
+| Tree-depth bound (Higham) | Formal bound | Reimplement |
+| Order-agnostic bound (Rump) | Formal bound | Reimplement |
+| Random order testing | Empirical | Reimplement |
+| FPTaylor | Formal bound | [link](https://github.com/soarlab/FPTaylor) |
+| Gappa | Formal bound | [link](https://gappa.gitlabpages.inria.fr/) |
+| Daisy | Formal bound | [link](https://github.com/malyzajko/daisy) |
+| Satire | Formal, first-order | [link](https://github.com/arnabd88/Satire) |
+| z3 bit-precise | Formal bound | [link](https://github.com/Z3Prover/z3) |
+
+### Shows the gap: no ε bound
+
+| Baseline | Evidence | Repository |
+|---|---|---|
+| Alive2 | Formal, bounded | [link](https://github.com/AliveToolkit/alive2) |
+| mlir-tv | Formal equivalence, no ε | [link](https://github.com/aqjune/mlir-tv) |
+
+### Context
+
+| Baseline | Evidence | Repository |
+|---|---|---|
+| APEG / Sardana | Abstract interpretation; no bound between two orders | Not located |
+| NumFuzz | Formal bound | [link](https://github.com/Athena-Types/NumFuzz) |
+| PRECiSA | Formal bound | [link](https://github.com/nasa/PRECiSA) |
+| FLiT | Empirical | [link](https://github.com/PRUNERS/FLiT) |
+| Verificarlo | Empirical | [link](https://github.com/verificarlo/verificarlo) |
+| TAO thresholds | Empirical | Not located |
+| Higham–Mary | Probabilistic | Reimplement |
+| VCFloat / LAProof | Formal bound | [link](https://github.com/VeriNum/vcfloat) |
+
+Out of scope, kept in `baselines/registry.yaml` in case the scope widens: Bean, TensorRight, Volta, arm-tv, α,β-CROWN, ReluDiff / NeuroDiff, Marabou, NNSmith, WhiteFox, MLIRSmith, TorchLean.
 
 ## Use
 

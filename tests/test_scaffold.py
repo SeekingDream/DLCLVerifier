@@ -96,3 +96,10 @@ def test_every_model_has_known_dataset(monkeypatch):
         return d
     monkeypatch.setattr(config, "load", broken)
     assert any("unknown dataset" in p for p in config.validate())
+
+
+def test_reassociation_scope_baselines():
+    b = {x["id"]: x for x in config.load("baselines/registry.yaml")["baselines"]}
+    assert b["tree_depth_bound"]["role"] == "main"
+    assert b["alive2"]["role"] == "gap"
+    assert b["alpha_beta_crown"]["role"] == "out_of_scope"

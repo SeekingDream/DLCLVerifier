@@ -2,6 +2,23 @@
 
 Status: **proposal for team review**. No component enforces it yet.
 
+## Scope
+
+The target is the numerical difference caused by **non-associativity of floating-point addition**,
+for example `(a+b)+c ≠ a+(b+c)`. A pair is in scope when `M` and `C` add the same operands in
+different trees, so they are equal in real arithmetic.
+
+| In scope | Out of scope, reported as `unsupported_path` |
+|---|---|
+| Reduction, dot, matmul and convolution accumulation order | FMA contraction |
+| Vectorized and thread-partitioned reductions | Precision changes |
+| LLVM `reassoc` on additions | Merged or folded constants, such as Conv+BatchNorm fusion |
+| Reordering with fixed multiplications | Polynomial or library replacement of elementary functions |
+
+Multiplicative reassociation and distribution are also out of scope for now. Real-equality of the
+pair is an obligation the frontend must check, not an assumption. Sections below on wider
+formats and effects apply only if the scope widens.
+
 ## Property
 
 Let `M` be the model program, `C` the compiled artifact, `X` the input domain and

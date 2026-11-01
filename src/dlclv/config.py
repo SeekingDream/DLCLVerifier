@@ -4,6 +4,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 STATUS = {"implemented", "pilot", "unimplemented"}
+ROLE = {"main", "gap", "context", "out_of_scope"}
 GUARANTEE = {"formal", "formal_real_semantics", "formal_first_order", "formal_equality", "formal_bounded", "probabilistic", "empirical"}
 
 
@@ -34,6 +35,10 @@ def validate():
         seen.add(b["id"])
         if b.get("guarantee") not in GUARANTEE:
             bad.append(f"baseline {b['id']}: bad guarantee")
+        if b.get("role") not in ROLE:
+            bad.append(f"baseline {b['id']}: bad role")
+        if (b.get("role") == "out_of_scope") != (b.get("tier") == "dropped"):
+            bad.append(f"baseline {b['id']}: out_of_scope and tier dropped must match")
         if b.get("integration") not in STATUS:
             bad.append(f"baseline {b['id']}: bad integration status")
     data = {d["id"] for d in load("configs/datasets.yaml")["datasets"]}
