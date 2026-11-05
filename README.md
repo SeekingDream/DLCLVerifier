@@ -159,6 +159,19 @@ those wheels; the recorded run used Python 3.11 on x86-64 macOS:
 python pilot/run_pilot.py --out /path/to/output.json --smt-timeout 90
 ```
 
+## Models and data (`utils.py`)
+
+`load_data_model(task_id, data_num)` returns `(model, dataloader, input_domain)` for one
+(model, dataset) task; `utils.TASKS` lists the 17 tasks. Install `requirements-eval.txt`, then:
+
+```bash
+CUDA_VISIBLE_DEVICES=7 python test/test_load_data_model.py --data-num 8
+```
+
+ImageNet (`ILSVRC/imagenet-1k`) and the Llama models are gated: run `huggingface-cli login`, or
+set `DLCLV_IMAGENET_DIR` to a local ImageNet validation folder in ImageFolder layout.
+`vnncomp_small_nets` and `text_classification_v2` are not supported yet.
+
 ## Layout
 
 ```
