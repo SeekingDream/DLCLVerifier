@@ -98,3 +98,46 @@ paths:
     stages: [edge_dialect, delegate_graph, xnnpack_kernels]
     configuration: {}
     known_blockers: [Hand-written kernels need a binary-level or axiomatic story]
+  # GPU paths compiled and run by utils.load_compiler (compilers.py). pilot: they compile and run
+  # models for measurement; there is no verifier support. All run float32 with TF32 off.
+  - id: torch_inductor_gpu
+    tier: core
+    status: pilot
+    system: TorchInductor (torch.compile) CUDA
+    target: NVIDIA GPU
+    stages: [fx_graph, inductor_lir, triton_kernels_and_cublas]
+    configuration: {mode: [default, max-autotune], allow_tf32: false}
+    known_blockers: [cuBLAS calls are opaque; only generated Triton kernels are inspectable]
+  - id: ort_cuda_gpu
+    tier: core
+    status: pilot
+    system: ONNX Runtime CUDA execution provider
+    target: NVIDIA GPU
+    stages: [onnx, onnx_optimized, cuda_kernels]
+    configuration: {levels: [disable, basic, extended, all], use_tf32: 0}
+    known_blockers: [cuDNN and cuBLAS kernels are opaque]
+  - id: tensorrt_gpu
+    tier: core
+    status: pilot
+    system: TensorRT from ONNX
+    target: NVIDIA GPU
+    stages: [onnx, tensorrt_engine]
+    configuration: {builder_optimization_level: [0, 1, 2, 3, 4, 5], tf32: false, fp16: false}
+    known_blockers:
+      - Closed runtime; black-box differential evidence only, so VERIFIED is unreachable
+  - id: triton_kernels
+    tier: core
+    status: pilot
+    system: Triton (GEMM-shaped ops replaced by a Triton batched GEMM)
+    target: NVIDIA GPU
+    stages: [torch_function_dispatch, triton_ir, ptx]
+    configuration: {input_precision: ieee, knobs: [block_m, block_n, block_k, split_k, num_warps, num_stages]}
+    known_blockers: [only split_k changes the addition order; tile sizes do not]
+  - id: tilelang_kernels
+    tier: core
+    status: pilot
+    system: TileLang (GEMM-shaped ops replaced by a TileLang batched GEMM)
+    target: NVIDIA GPU
+    stages: [torch_function_dispatch, tilelang_tir, cuda_c]
+    configuration: {accumulation: explicit fp32 FMA, knobs: [block_m, block_n, block_k, num_stages, threads, split_k]}
+    known_blockers: [T.gemm uses TF32 for float32 inputs, so it is not used]

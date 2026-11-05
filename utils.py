@@ -301,6 +301,9 @@ def load_model(task_id: int, device: Optional[str] = None) -> nn.Module:
         model = _hf_model(name)
     model.eval().requires_grad_(False)
     model.task = task
+    # Eager is the reference: keep float32 exact (PyTorch allows TF32 for cuDNN conv by default).
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
     return model.to(device)
 
 
@@ -466,3 +469,106 @@ def load_data_model(task_id: int, data_num: int, batch_size: int = 8,
     loader = DataLoader(SampleDataset(samples), batch_size=batch_size, shuffle=False,
                         collate_fn=collate)
     return model, loader, domain
+
+
+# --------------------------------------------------------------------------------------------
+# Compilers (implementations in compilers.py)
+# --------------------------------------------------------------------------------------------
+
+def list_compilers():
+    from compilers import COMPILERS
+    return dict(COMPILERS)
+
+
+def load_compiler(compiler, **options):
+    """Return `compile_fn(model, example_inputs) -> Compiled` for one GPU compilation path.
+
+    `compiler` is an id or name from `compilers.COMPILERS`: 0 eager, 1 torch_compile,
+    2 onnxruntime_gpu, 3 tensorrt, 4 triton, 5 tilelang. `options` are that path's knobs,
+    e.g. `load_compiler("triton", block_k=64, split_k=4)` or `load_compiler(1, mode="max-autotune")`.
+    `example_inputs` is one batch of inputs from the loader; TensorRT engines accept batches up to
+    its size. Every path runs float32 with TF32 off. The returned object is called like the model.
+    """
+    import compilers as C
+    name = C.COMPILERS[compiler] if isinstance(compiler, int) else compiler
+    if name not in C.BACKENDS:
+        raise ValueError(f"unknown compiler {compiler!r}; choose from {C.COMPILERS}")
+    backend = C.BACKENDS[name]
+
+    def compile_fn(model, example_inputs):
+        C.strict_fp32()
+        dev = C._device_of(model)
+        compiled = backend(model, tuple(x.to(dev) for x in example_inputs), **options)
+        run = compiled.run
+        compiled.run = lambda *xs: run(*(x.to(dev) for x in xs))
+        return compiled
+
+    compile_fn.compiler, compile_fn.options = name, options
+    return compile_fn
+
+
+# --------------------------------------------------------------------------------------------
+# Differential testing
+# --------------------------------------------------------------------------------------------
+
+def _output_error(o1, o2):
+    """Elementwise |o1 - o2| per sample, flattened to [B, -1].
+
+    NaN in both outputs at the same place counts as agreement; a non-finite value in only one
+    output, or infinities of opposite sign, count as an infinite error.
+    """
+    o1, o2 = o1.double().flatten(1), o2.double().flatten(1)
+    err = (o1 - o2).abs()
+    same = (o1 == o2) | (torch.isnan(o1) & torch.isnan(o2))
+    err = torch.where(same, torch.zeros_like(err), err)
+    return torch.nan_to_num(err, nan=float("inf"))
+
+
+def diff_testing(tensor_prog_1, tensor_prog_2, test_num: int, input_domain: InputDomain,
+                 batch_size: int = 4, seed: int = SEED, device: Optional[str] = None,
+                 return_details: bool = False):
+    """Run two tensor programs on `test_num` random points of `input_domain`; return max |out1 - out2|.
+
+    `tensor_prog_1` and `tensor_prog_2` are callables taking the inputs of the domain, e.g. a
+    model from `load_model` and a `Compiled` from `load_compiler`. Points are drawn uniformly from
+    the domain box with a fixed seed, in batches of `batch_size` (a TensorRT engine accepts at most
+    the batch size it was compiled with). Every point is checked to lie in the domain.
+
+    Returns the maximum elementwise absolute output error over all tests, as a float. With
+    `return_details=True` it returns a dict that also holds the maximum relative error
+    (|diff| / max|out1| of that sample), the mean of the per-test maxima, and the witness: the
+    whole batch that produced the maximum (`witness`, a tuple of CPU tensors) and the position of
+    the worst sample in it (`witness_index`). The batch is kept because compiled programs choose
+    kernels by batch size, so a sample run alone can give a different error.
+
+    Sampling never proves a bound: the result is a lower bound on the true maximum error.
+    """
+    if test_num < 1:
+        raise ValueError("test_num must be positive")
+    device = device or default_device()
+    gen = torch.Generator().manual_seed(seed)
+    best, best_rel, per_test, witness, witness_index = -1.0, 0.0, [], None, -1
+    with torch.no_grad():
+        for start in range(0, test_num, batch_size):
+            n = min(batch_size, test_num - start)
+            xs = input_domain.sample(n, gen)
+            assert input_domain.contains(xs), "sampled point outside the input domain"
+            xs = tuple(x.to(device) for x in xs)
+            o1, o2 = tensor_prog_1(*xs), tensor_prog_2(*xs)
+            if o1.shape != o2.shape:
+                raise ValueError(f"output shapes differ: {tuple(o1.shape)} vs {tuple(o2.shape)}")
+            err = _output_error(o1, o2)                       # [n, numel]
+            sample_max = err.max(1).values
+            per_test += sample_max.tolist()
+            i = int(sample_max.argmax())
+            if sample_max[i].item() > best:
+                best = sample_max[i].item()
+                scale = o1[i].double().abs().max().clamp(min=1e-30).item()
+                best_rel = best / scale
+                witness, witness_index = tuple(x.cpu() for x in xs), i
+    if not return_details:
+        return best
+    return {"max_abs_error": best, "max_rel_error": best_rel,
+            "mean_max_abs_error": float(np.mean(per_test)), "test_num": test_num,
+            "seed": seed, "batch_size": batch_size, "witness": witness,
+            "witness_index": witness_index}

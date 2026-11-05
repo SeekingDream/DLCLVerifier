@@ -6,3 +6,4 @@ __pycache__/
 third_party/
 results/runs/
 .DS_Store
+work_dir/

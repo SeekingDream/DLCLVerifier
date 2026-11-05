@@ -10,3 +10,8 @@ soundfile
 librosa
 pillow
 PyYAML>=6
+# Compilation paths (utils.load_compiler). triton 3.2.0 comes with torch 2.6.0.
+onnx==1.17.0
+onnxruntime-gpu==1.21.1
+tensorrt-cu12==10.9.0.34
+tilelang==0.1.15

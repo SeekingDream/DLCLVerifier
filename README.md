@@ -24,6 +24,8 @@ The bound to beat is the tree-depth bound for both orders, combined by the trian
 | Property draft (`docs/SPECIFICATION.md`) | Proposal for review |
 | Evaluation plan (`docs/EVALUATION_PLAN.md`) | Written |
 | Configs (`configs/`) | Written and validated for structure and dataset references |
+| Models, data, domains (`utils.load_data_model`) | **Implemented**; tested except ImageNet data and Llama (gated) |
+| GPU compile paths (`utils.load_compiler`) | **Pilot**: compile and run; no verifier |
 | Outcome rules (`src/dlclv/outcomes.py`) | **Implemented, tested** |
 | Config validation and status report (`dlclv`) | **Implemented, tested** |
 | Pilot (`pilot/`, `docs/PILOT_RESULTS.md`) | **Ran locally; exploratory evidence only** |
@@ -166,6 +168,20 @@ python pilot/run_pilot.py --out /path/to/output.json --smt-timeout 90
 
 ```bash
 CUDA_VISIBLE_DEVICES=7 python test/test_load_data_model.py --data-num 8
+```
+
+`load_compiler(compiler, **options)` returns `compile_fn(model, example_inputs)`, whose result is
+called like the model. Paths (`compilers.py`): `eager`, `torch_compile`, `onnxruntime_gpu`,
+`tensorrt`, `triton`, `tilelang`; all run float32 with TF32 off. Triton and TileLang replace
+linear, matmul and convolution with their own GEMM kernels; `split_k` sets their addition order.
+
+`diff_testing(prog_1, prog_2, test_num, input_domain)` runs both programs on `test_num` seeded
+random points of the domain and returns the maximum absolute output error (a lower bound, never a
+certificate); `return_details=True` adds the witness batch that produced it.
+
+```bash
+CUDA_VISIBLE_DEVICES=7 python test/test_load_compiler.py
+CUDA_VISIBLE_DEVICES=7 python test/test_diff_testing.py
 ```
 
 ImageNet (`ILSVRC/imagenet-1k`) and the Llama models are gated: run `huggingface-cli login`, or
