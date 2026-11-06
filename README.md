@@ -48,6 +48,29 @@ max_err = utils.diff_testing(model, compiled, test_num=256, input_domain=domain)
   points of the domain and returns the maximum absolute output error. `return_details=True` adds
   the relative error and the witness batch. Sampling gives a lower bound, never a certificate.
 
+## Certifier
+
+`src/dlclv` bounds `|prog_1(x) - prog_2(x)|` over a whole input domain, not just sampled points:
+
+```python
+from dlclv.certifier import TensorProgramCertifier
+cert = TensorProgramCertifier(model, compiled, domain, {"epsilon": 1e-4,
+                                                         "assume_sum_of_products_conv": True})
+cert.match().summary()          # which operations correspond (fusions, unmatched regions)
+res = cert.certify()            # verified | bounded | inconclusive (with a reason)
+print(res.summary(), res.assumptions)
+```
+
+- Graphs come from `torch.export`, ONNX files, ONNX Runtime's optimized graph, and the `eager`,
+  `triton`, `tilelang` and `onnxruntime_gpu` paths. TensorRT and `torch.compile` are not
+  extractable yet.
+- The two graphs are matched into units of corresponding operations, e.g. add+ReLU vs a fused
+  kernel.
+- Each unit is interpreted with `[min, max, max_error]` triples. Accumulations use a known order
+  (Triton/TileLang kernels, or FPRev evidence) or a bound over every admissible order.
+- Design and current precision: `docs/ABSTRACT_INTERPRETATION.md`. The bounds are sound on every
+  model pair tested but still loose: one interval per tensor over the full input box.
+
 ## Tasks
 
 | ID | Model | Dataset | Input domain |
@@ -99,7 +122,9 @@ On server3 (RTX 6000 Ada, GPU 7) all checks pass, except where gated data or wei
 CUDA_VISIBLE_DEVICES=7 python test/test_load_data_model.py --data-num 8
 CUDA_VISIBLE_DEVICES=7 python test/test_load_compiler.py    # tasks x compilers, vs eager and fp64
 CUDA_VISIBLE_DEVICES=7 python test/test_diff_testing.py
-pytest                                                      # scaffold: configs and outcome rules
+CUDA_VISIBLE_DEVICES=7 python test/test_certifier_models.py # certify, then check vs diff_testing
+CUDA_VISIBLE_DEVICES=7 python test/test_fprev_gpu.py        # GEMM accumulation orders (FPRev)
+pytest                                                      # src/dlclv: matching, bounds, FPRev
 ```
 
 ## Baselines
@@ -118,7 +143,7 @@ test/           GPU tests for the above
 configs/        compilation paths, benchmarks, datasets, domains, experiment protocol
 docs/           specification, evaluation plan, pilot results, references
 baselines/      baseline registry and integration plan
-src/dlclv/      outcome rules, config checks, unimplemented verifier interfaces
+src/dlclv/      certifier: graph extraction, matching, FP error model, FPRev, abstract interpretation
 pilot/          earlier exploratory CPU measurement (docs/PILOT_RESULTS.md)
 tests/          tests for src/dlclv
 ```

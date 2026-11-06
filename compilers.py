@@ -61,6 +61,8 @@ class Compiled:
     compile_seconds: float = 0.0
     artifact: str = ""        # path of the exported or built artifact, if any
     stats: object = None      # per-op swap counts for the kernel paths
+    source_model: object = None   # the model this was compiled from (graph extraction)
+    meta: dict = None             # extra artifacts, e.g. the ONNX Runtime optimized graph
 
     def __call__(self, *inputs):
         with torch.no_grad():
@@ -93,7 +95,7 @@ def _warmup(compiled_run, example_inputs):
 # --------------------------------------------------------------------------------------------
 
 def compile_eager(model, example_inputs):
-    return Compiled("eager", {}, model)
+    return Compiled("eager", {}, model, source_model=model, meta={})
 
 
 def compile_torch(model, example_inputs, mode="default", dynamic=False):
@@ -107,7 +109,8 @@ def compile_torch(model, example_inputs, mode="default", dynamic=False):
         return fn(*inputs).clone()
 
     secs = _warmup(run, example_inputs)
-    return Compiled("torch_compile", {"mode": mode, "dynamic": dynamic}, run, secs)
+    return Compiled("torch_compile", {"mode": mode, "dynamic": dynamic}, run, secs,
+                    source_model=model, meta={})
 
 
 # --------------------------------------------------------------------------------------------
@@ -180,6 +183,14 @@ def compile_ort(model, example_inputs, graph_optimization="all", conv_algo_searc
     so = ort.SessionOptions()
     so.graph_optimization_level = getattr(ort.GraphOptimizationLevel, _ORT_LEVELS[graph_optimization])
     so.log_severity_level = 3
+    # Save the graph ONNX Runtime actually runs (after its fusions) for graph extraction.
+    optimized = os.path.join(os.path.dirname(path),
+                             f"ort_optimized_{graph_optimization}.onnx")
+    so.optimized_model_filepath = optimized
+    so.add_session_config_entry("session.optimized_model_external_initializers_file_name",
+                                f"ort_optimized_{graph_optimization}.weights")
+    so.add_session_config_entry("session.optimized_model_external_initializers_min_size_in_bytes",
+                                "1024")
     dev_id = dev.index if dev.index is not None else torch.cuda.current_device()
     providers = [("CUDAExecutionProvider", {"device_id": dev_id, "use_tf32": 0,
                                              "cudnn_conv_algo_search": conv_algo_search})]
@@ -200,7 +211,9 @@ def compile_ort(model, example_inputs, graph_optimization="all", conv_algo_searc
 
     secs = time.time() - t + _warmup(run, example_inputs)
     opts = {"graph_optimization": graph_optimization, "conv_algo_search": conv_algo_search}
-    return Compiled("onnxruntime_gpu", opts, run, secs, artifact=path)
+    meta = {"onnx": path, "ort_optimized_onnx": optimized if os.path.isfile(optimized) else None}
+    return Compiled("onnxruntime_gpu", opts, run, secs, artifact=path, source_model=model,
+                    meta=meta)
 
 
 # --------------------------------------------------------------------------------------------
@@ -260,7 +273,8 @@ def compile_tensorrt(model, example_inputs, optimization_level=3, workspace_gb=8
 
     secs = time.time() - t + _warmup(run, example_inputs)
     opts = {"optimization_level": optimization_level, "max_batch": bs}
-    return Compiled("tensorrt", opts, run, secs, artifact=plan)
+    return Compiled("tensorrt", opts, run, secs, artifact=plan, source_model=model,
+                    meta={"onnx": onnx_path})
 
 
 # --------------------------------------------------------------------------------------------
@@ -374,7 +388,7 @@ def _compile_kernel_path(name, bmm, model, example_inputs, options):
             return model(*inputs)
 
     secs = _warmup(run, example_inputs)
-    return Compiled(name, options, run, secs, stats=mode.stats)
+    return Compiled(name, options, run, secs, stats=mode.stats, source_model=model, meta={})
 
 
 # ---- Triton ----

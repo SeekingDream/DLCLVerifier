@@ -7,14 +7,17 @@ class Unimplemented(NotImplementedError):
 
 
 class Frontend(ABC):
-    """Extract a (source, target) pair from one compiler stage boundary."""
+    """Extract a graph from one program. Implementations: frontends.TorchExportFrontend,
+    frontends.OnnxFrontend."""
     @abstractmethod
     def extract(self, model, path_config):
         raise Unimplemented
 
 
 class RelationalAnalyzer(ABC):
-    """Compute a certified bound on d(M(x), C(x)) for all x in the domain."""
+    """Compute a certified bound on d(M(x), C(x)) for all x in the domain.
+    certifier.TensorProgramCertifier implements it for matched program pairs, with
+    absint.FloatErrorInterpreter as the abstract interpretation stage."""
     @abstractmethod
     def certify(self, pair, domain, spec):
         raise Unimplemented

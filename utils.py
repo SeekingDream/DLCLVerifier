@@ -154,6 +154,24 @@ def image_domain(size: int = 224) -> InputDomain:
         note="RGB pixels in [0, 1] before normalization; local balls D1/D2 clip to this box")
 
 
+def local_domain(base: InputDomain, sample, radius: float = 0.0) -> InputDomain:
+    """D0 (radius 0: the sample itself) or D1/D2 (an L-inf ball of `radius` around the sample,
+    clipped to `base`). `sample` is a tuple of tensors without the batch dimension. Integer
+    inputs (token ids, masks) are always kept at the sample."""
+    lower, upper = [], []
+    for x, dt, lo, hi in zip(sample, base.dtypes, base.lower, base.upper):
+        x = torch.as_tensor(x).to(torch.float64).cpu()
+        r = radius if dt.is_floating_point else 0.0
+        lo = torch.as_tensor(lo, dtype=torch.float64).expand(x.shape)
+        hi = torch.as_tensor(hi, dtype=torch.float64).expand(x.shape)
+        lower.append(torch.maximum(x - r, lo))
+        upper.append(torch.minimum(x + r, hi))
+    did = "D0_point" if radius == 0 else f"D_local_{radius:g}"
+    return InputDomain(did, "linf_ball" if radius else "point", list(base.names),
+                       list(base.shapes), list(base.dtypes), lower, upper,
+                       note=f"radius {radius:g} around one sample, clipped to {base.domain_id}")
+
+
 def token_domain(vocab_size: int, seq_len: int, token_type: bool = False) -> InputDomain:
     names = ["input_ids", "attention_mask"] + (["token_type_ids"] if token_type else [])
     n = len(names)
