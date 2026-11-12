@@ -1811,7 +1811,14 @@ class BacksubAnalyzer:
             K = int(np.prod(g.values[node.inputs[1]].shape[1:]))
         else:
             K = 0
-        return self.oracle.order(impl, sop, node.op, K)
+        key = None
+        if node.op == "matmul":
+            # the exact kernel call: operand shapes, source operator, and whether its bias add
+            # belongs to the same call (fprev.linear_key)
+            key = (impl.get("backend", "unknown"), "matmul",
+                   tuple(g.values[node.inputs[0]].shape), tuple(g.values[node.inputs[1]].shape),
+                   _base_op(sop), self._bias_leaf(g, node) is not None)
+        return self.oracle.order(impl, sop, node.op, K, key)
 
     # ---- per-side rounding inside a unit ----
 
@@ -2223,6 +2230,7 @@ class BacksubAnalyzer:
           "leaf"  sum_i pow2floor(|x_i|)                   (separately rounded products)
           "seq"   sequential chain in natural order        (mode "seq")
           "any"   the largest sum over all binary trees    (mode "any")
+          "tree"  a known binary tree                      (mode ("tree", SumTree))
           per range (a, b): ("seq", a, b), ("leaf", a, b) for a chain from 0 over leaves
           a..b-1, and its exact sum's enclosure ("lo", a, b), ("hi", a, b), ("abs", a, b).
         gamma multiplies the magnitude sum W of the node (accumulated rounding below it, plus
@@ -2256,6 +2264,30 @@ class BacksubAnalyzer:
             out["any"] = M.sum(1)
             if sq:
                 out["any2"] = (M * M).sum(1)
+        elif isinstance(mode, tuple) and mode[0] == "tree":
+            # a known binary tree: the exact sum under a node is the sum of its leaves'
+            # intervals, computed bottom-up level by level
+            t = mode[1]
+            nt, T = t.n_total, t.n_total + len(t.children)
+
+            def full(v):
+                z = torch.zeros((v.shape[0], T, v.shape[2]), dtype=v.dtype, device=v.device)
+                z[:, :K] = v
+                return z
+            NL, NH, NA = full(lo), full(hi), full(A)
+            for nodes, left, right in t.levels():
+                nodes, left, right = [torch.as_tensor(i, device=lo.device)
+                                      for i in (nodes, left, right)]
+                NL[:, nodes] = NL[:, left] + NL[:, right]
+                NH[:, nodes] = NH[:, left] + NH[:, right]
+                NA[:, nodes] = NA[:, left] + NA[:, right]
+            M = torch.minimum(_mag(NL[:, nt:], NH[:, nt:]), NA[:, nt:]) + keta \
+                + g_ * (NA[:, nt:] + keta)
+            M = p2(M)
+            out["tree"] = M.sum(1)
+            if sq:
+                out["tree2"] = (M * M).sum(1)
+            del NL, NH, NA
         for (a, b) in ranges:
             if b <= a:
                 continue
@@ -2640,9 +2672,16 @@ class BacksubAnalyzer:
         g_ = fmt.gamma(K + 1) + (K + 2) * 2.0 ** -50
         keta = K * eta if products else 0.0
         tail = 2 * K * (u * K * eta * 2 + 2 * eta) ** 2
-        if isinstance(order, fpm.Known):
+        if isinstance(order, fpm.Known) and (
+                order.tree.seq_order is None
+                or list(order.tree.seq_order) != list(range(order.tree.n))):
+            st = X(("signed", (("tree", order.tree), True, g_, keta, ())))
+            var = 2 * u * u * st["tree2"] + tail
+            if products:
+                var = var + 2 * u * u * st["leaf2"] + 2 * K * eta * eta
+        elif isinstance(order, fpm.Known):
             t = order.tree
-            if t.seq_order is None or list(t.seq_order) != list(range(t.n)) or t.n_zero != 1:
+            if t.n_zero != 1:
                 raise _unsupported_path("known non-sequential trees are bounded per tensor "
                                         "only (use method='interval')")
             st = X(("signed", ("seq", True, g_, keta, ())))
@@ -2698,8 +2737,14 @@ class BacksubAnalyzer:
         if isinstance(order, fpm.Known):
             t = order.tree
             if t.seq_order is None or list(t.seq_order) != list(range(t.n)):
-                raise _unsupported_path("known non-sequential trees are bounded per tensor "
-                                        "only (use method='interval')")
+                # a revealed tree (fprev): one half-ulp per node of its own partial sum. Every
+                # product is charged its own rounding, which also covers a kernel that fuses
+                # some of them into the accumulation (an FMA rounds once, at the node).
+                st = X(("signed", (("tree", t), True, g_, keta, ())))
+                b = u * st["tree"]
+                if products:
+                    b = b + len(t.children) * eta + u * st["leaf"] + K * eta
+                return b
             zero = t.n_zero == 1
             nodes = K if zero else K - 1
             st = X(("signed", ("seq", zero, g_, keta, ())))

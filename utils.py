@@ -142,10 +142,21 @@ class InputDomain:
             hi = torch.as_tensor(hi, dtype=torch.float64).expand(shape)
             u = torch.rand((n, *shape), dtype=torch.float64, generator=generator)
             if dt.is_floating_point:
-                out.append((lo + u * (hi - lo)).to(dt))
+                out.append(_into_box((lo + u * (hi - lo)).to(dt), lo, hi))
             else:
                 out.append(torch.floor(lo + u * (hi - lo + 1)).clamp(max=hi).to(dt))
         return tuple(out)
+
+
+def _into_box(y, lo, hi):
+    """Clamp a floating-point tensor into [lo, hi] (float64 bounds). A cast or a clamp to a
+    rounded bound may land just outside the box: such a value is moved to the next one inside."""
+    lo = torch.as_tensor(lo, dtype=torch.float64, device=y.device)
+    hi = torch.as_tensor(hi, dtype=torch.float64, device=y.device)
+    y = torch.maximum(torch.minimum(y.to(torch.float64), hi), lo).to(y.dtype)
+    inf = torch.tensor(float("inf"), dtype=y.dtype, device=y.device)
+    y = torch.where(y.to(torch.float64) < lo, torch.nextafter(y, inf), y)
+    return torch.where(y.to(torch.float64) > hi, torch.nextafter(y, -inf), y)
 
 
 def image_domain(size: int = 224) -> InputDomain:
@@ -590,3 +601,124 @@ def diff_testing(tensor_prog_1, tensor_prog_2, test_num: int, input_domain: Inpu
             "mean_max_abs_error": float(np.mean(per_test)), "test_num": test_num,
             "seed": seed, "batch_size": batch_size, "witness": witness,
             "witness_index": witness_index}
+
+
+def search_max_diff(tensor_prog_1, tensor_prog_2, input_domain: InputDomain, budget: int = 2000,
+                    seed: int = SEED, device: Optional[str] = None, model=None,
+                    return_details: bool = False):
+    """Search `input_domain` for a large |out1 - out2|: a stronger lower bound than uniform
+    sampling (`diff_testing`), still never a certificate.
+
+    Every point is run on its own (batch size 1, the certified shape). The budget of program
+    runs is spent in four phases:
+
+      uniform   uniform random points, as `diff_testing`
+      corners   random vertices of the box: large magnitudes give large partial sums, and
+                rounding errors scale with them
+      gradient  with `model` (the eager module), the vertices that push one output up or down
+                (the sign of d out_c / d x at the centre of the box): the terms of that output
+                stop cancelling
+      climb     hill climbing from the best points: resample a few coordinates, push a few to
+                the box boundary, or move a few by some ulps; keep a change that does not
+                lower the difference
+
+    Returns the largest difference found. With `return_details=True`: a dict with it, the
+    uniform-only maximum, the phase that found it, the number of runs, and the witness input.
+    """
+    device = device or default_device()
+    gen = torch.Generator().manual_seed(seed)
+    los = [torch.as_tensor(lo, dtype=torch.float64).expand(sh).clone()
+           for lo, sh in zip(input_domain.lower, input_domain.shapes)]
+    his = [torch.as_tensor(hi, dtype=torch.float64).expand(sh).clone()
+           for hi, sh in zip(input_domain.upper, input_domain.shapes)]
+    floats = [dt.is_floating_point for dt in input_domain.dtypes]
+    state = {"best": -1.0, "phase": "", "witness": None, "evals": 0, "uniform": -1.0}
+
+    def run(xs, phase):
+        assert input_domain.contains(xs), "search point outside the input domain"
+        with torch.no_grad():
+            dx = tuple(x.to(device) for x in xs)
+            err = _output_error(tensor_prog_1(*dx), tensor_prog_2(*dx)).max().item()
+        state["evals"] += 1
+        if err > state["best"]:
+            state.update(best=err, phase=phase, witness=tuple(x.clone() for x in xs))
+        return err
+
+    is_point = all(bool((lo == hi).all()) for lo, hi in zip(los, his))
+    n_uniform = 1 if is_point else max(1, budget // 4)
+    pool = []
+    for _ in range(n_uniform):
+        xs = input_domain.sample(1, gen)
+        pool.append((run(xs, "uniform"), xs))
+    state["uniform"] = state["best"]
+    if not is_point:
+        base = input_domain.sample(1, gen)             # integer inputs stay at this sample
+
+        def vertex(choose_hi):
+            return tuple(_into_box(torch.where(c, hi, lo).to(dt), lo, hi)[None] if f else b
+                         for c, lo, hi, dt, f, b in zip(choose_hi, los, his,
+                                                        input_domain.dtypes, floats, base))
+
+        for _ in range(budget // 8):
+            xs = vertex([torch.rand(lo.shape, generator=gen) < 0.5 for lo in los])
+            pool.append((run(xs, "corners"), xs))
+        if model is not None and any(floats):
+            centre = [((lo + hi) / 2).to(dt)[None].to(device).requires_grad_(f)
+                      if f else b.to(device)
+                      for lo, hi, dt, f, b in zip(los, his, input_domain.dtypes, floats, base)]
+            try:
+                with torch.enable_grad():
+                    out = model(*centre).flatten()
+                    grads = []
+                    for c in range(min(out.numel(), max(1, budget // 16))):
+                        gr = torch.autograd.grad(out[c], [x for x, f in zip(centre, floats) if f],
+                                                 retain_graph=True, allow_unused=True)
+                        grads.append(gr)
+            except Exception:
+                grads = []
+            for gr in grads:
+                for sign in (1.0, -1.0):
+                    it = iter(gr)
+                    choose = []
+                    for lo, f in zip(los, floats):
+                        gk = next(it) if f else None
+                        choose.append(torch.zeros(lo.shape, dtype=torch.bool) if gk is None
+                                      else (sign * gk[0].cpu() > 0))
+                    xs = vertex(choose)
+                    pool.append((run(xs, "gradient"), xs))
+        pool.sort(key=lambda t: -t[0])
+        fronts = [[e, tuple(x.clone() for x in xs)] for e, xs in pool[:4]]
+        k = 0
+        while state["evals"] < budget and fronts:
+            fr = fronts[k % len(fronts)]
+            k += 1
+            new = []
+            move = int(torch.randint(0, 3, (1,), generator=gen))
+            for x, lo, hi, dt, f in zip(fr[1], los, his, input_domain.dtypes, floats):
+                if not f:
+                    new.append(x)
+                    continue
+                frac = float(torch.rand(1, generator=gen)) * 0.1 + 0.002
+                pick = torch.rand(lo.shape, generator=gen) < frac
+                if move == 0:        # resample
+                    val = (lo + torch.rand(lo.shape, dtype=torch.float64, generator=gen)
+                           * (hi - lo)).to(dt)
+                elif move == 1:      # to the boundary
+                    val = torch.where(torch.rand(lo.shape, generator=gen) < 0.5, lo, hi).to(dt)
+                else:                # a few ulps
+                    val = x[0].clone()
+                    up = torch.rand(lo.shape, generator=gen) < 0.5
+                    inf = torch.tensor(float("inf"), dtype=dt)
+                    for _ in range(int(torch.randint(1, 4, (1,), generator=gen))):
+                        val = torch.where(up, torch.nextafter(val, inf),
+                                          torch.nextafter(val, -inf))
+                new.append(_into_box(torch.where(pick, val, x[0]), lo, hi)[None])
+            new = tuple(new)
+            e = run(new, "climb")
+            if e >= fr[0]:
+                fr[0], fr[1] = e, new
+    if not return_details:
+        return state["best"]
+    return {"max_abs_error": state["best"], "uniform_max": state["uniform"],
+            "phase": state["phase"], "evals": state["evals"], "seed": seed,
+            "witness": state["witness"]}

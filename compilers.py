@@ -62,7 +62,8 @@ class Compiled:
     artifact: str = ""        # path of the exported or built artifact, if any
     stats: object = None      # per-op swap counts for the kernel paths
     source_model: object = None   # the model this was compiled from (graph extraction)
-    meta: dict = None             # extra artifacts, e.g. the ONNX Runtime optimized graph
+    meta: dict = None             # evidence for graph extraction: the ONNX Runtime optimized
+                                  # graph, the kernel paths' call trace, Inductor's input graphs
 
     def __call__(self, *inputs):
         with torch.no_grad():
@@ -98,19 +99,142 @@ def compile_eager(model, example_inputs):
     return Compiled("eager", {}, model, source_model=model, meta={})
 
 
+class InductorCapture:
+    """Records every graph that AOTAutograd hands to TorchInductor for one model.
+
+    The record is made inside the compilation that produces the artifact, so the graph is the
+    one Inductor compiled, not a second trace. `records` is read by
+    `dlclv.frontends.AotGraphFrontend`, which documents the fields.
+    """
+
+    def __init__(self, model):
+        self.params = list(model.parameters()) + list(model.buffers())
+        self.records = []
+        self.inputs, self.key, self.seq = (), None, 0
+        self.dynamo = (None, [])     # Dynamo's graph module and the real inputs it passed
+
+    @staticmethod
+    def call_key(inputs):
+        return tuple((tuple(x.shape), str(x.dtype)) for x in inputs)
+
+    def begin(self, inputs):
+        from torch._dynamo.utils import counters
+        self.inputs, self.key = tuple(inputs), self.call_key(inputs)
+        self.seq += 1
+        self._n0 = len(self.records)
+        self._breaks0 = sum(counters["graph_break"].values())
+
+    def end(self):
+        from torch._dynamo.utils import counters
+        breaks = sum(counters["graph_break"].values()) - self._breaks0
+        for r in self.records[self._n0:]:
+            r["graph_breaks"] = breaks
+        self.inputs = ()
+
+    def _same(self, t, xs):
+        for k, x in enumerate(xs):
+            if t is x or (isinstance(x, torch.Tensor) and t.shape == x.shape and t.dtype == x.dtype
+                          and t.device == x.device and t.numel() > 0
+                          and t.data_ptr() == x.data_ptr()):
+                return k
+        return None
+
+    def real_inputs(self, example_inputs):
+        """The real tensors behind the (fake) example inputs of the AOT graph: the parameters
+        and buffers of Dynamo's graph module, then the inputs Dynamo passed to the backend."""
+        gm, xs = self.dynamo
+        real = list(dict(gm.named_parameters(remove_duplicate=False)).values()) + \
+            list(dict(gm.named_buffers(remove_duplicate=False)).values()) + list(xs)
+        if len(real) != len(example_inputs):
+            raise RuntimeError(f"{len(example_inputs)} graph inputs, {len(real)} real inputs")
+        for r, e in zip(real, example_inputs):
+            if isinstance(r, torch.Tensor) != isinstance(e, torch.Tensor) or (
+                    isinstance(r, torch.Tensor) and (tuple(r.shape) != tuple(e.shape)
+                                                     or r.dtype != e.dtype)):
+                raise RuntimeError("graph inputs do not line up with the real inputs")
+        return real
+
+    def record(self, gm, example_inputs, kwargs):
+        import torch.fx
+        graph = torch.fx.Graph()
+        graph.output(graph.graph_copy(gm.graph, {}))
+        for n in graph.nodes:
+            n.meta = {}                       # drop fake tensors; the frontend re-observes shapes
+        out_meta = [n for n in gm.graph.nodes if n.op == "output"][0].meta
+        static = set(kwargs.get("static_input_idxs") or ())
+        bindings = []
+        for i, t in enumerate(self.real_inputs(example_inputs)):
+            if not isinstance(t, torch.Tensor):
+                bindings.append(("literal", int(t)))
+                continue
+            k = self._same(t, self.inputs)
+            if k is not None:
+                bindings.append(("input", k))
+            elif i in static or self._same(t, self.params) is not None:
+                bindings.append(("const", t))
+            else:
+                bindings.append(("unknown", t))
+        ctx = torch._guards.TracingContext.try_get()
+        fw = getattr(ctx, "fw_metadata", None) if ctx is not None else None
+        self.records.append({
+            "graph_module": torch.fx.GraphModule(gm, graph),
+            "bindings": bindings,
+            "user_outputs": list(out_meta.get("user_visible_output_idxs") or []) or None,
+            "num_mutated": int(getattr(fw, "num_mutated_inp_runtime_indices", 0) or 0),
+            "is_inference": bool(kwargs.get("is_inference", True)),
+            "call": self.key,
+            "seq": self.seq,                  # which call compiled it (a later one: recompiled)
+            "torch": torch.__version__,
+        })
+
+    def inner_compile(self, gm, example_inputs, **kwargs):
+        from torch._inductor.compile_fx import compile_fx_inner
+        try:
+            self.record(gm, example_inputs, kwargs)
+        except Exception as e:                # the frontend reports it; compilation goes on
+            self.records.append({"error": f"{type(e).__name__}: {e}", "call": self.key,
+                                 "seq": self.seq})
+        return compile_fx_inner(gm, example_inputs, **kwargs)
+
+
+def compile_inductor(model, mode="default", dynamic=False):
+    """torch.compile(model, backend="inductor", mode=mode) with the compiled graphs captured.
+
+    Returns (run, capture). The backend is Inductor's own wrapper; the only change is that
+    `compile_fx` receives an `inner_compile` that records its arguments and then calls
+    Inductor's `compile_fx_inner`.
+    """
+    cap = InductorCapture(model)
+
+    class Backend(torch._TorchCompileInductorWrapper):
+        def __call__(self, model_, inputs_):
+            from torch._inductor.compile_fx import compile_fx
+            cap.dynamo = (model_, list(inputs_))
+            return compile_fx(model_, inputs_, inner_compile=cap.inner_compile,
+                              config_patches=self.config)
+
+    fn = torch.compile(model, backend=Backend(mode, None, dynamic), dynamic=dynamic)
+
+    def run(*inputs):
+        cap.begin(inputs)
+        try:
+            # max-autotune and reduce-overhead use CUDA graphs, which reuse output buffers.
+            torch.compiler.cudagraph_mark_step_begin()
+            out = fn(*inputs)
+            return out.clone() if isinstance(out, torch.Tensor) else out
+        finally:
+            cap.end()
+
+    return run, cap
+
+
 def compile_torch(model, example_inputs, mode="default", dynamic=False):
     _require_cuda(model, "torch_compile")
     torch._dynamo.reset()
-    fn = torch.compile(model, backend="inductor", mode=mode, dynamic=dynamic)
-
-    def run(*inputs):
-        # max-autotune and reduce-overhead use CUDA graphs, which reuse output buffers.
-        torch.compiler.cudagraph_mark_step_begin()
-        return fn(*inputs).clone()
-
+    run, cap = compile_inductor(model, mode, dynamic)
     secs = _warmup(run, example_inputs)
     return Compiled("torch_compile", {"mode": mode, "dynamic": dynamic}, run, secs,
-                    source_model=model, meta={})
+                    source_model=model, meta={"aot_graphs": cap.records})
 
 
 # --------------------------------------------------------------------------------------------
@@ -296,12 +420,18 @@ class GemmMode(TorchFunctionMode):
         super().__init__()
         self.bmm = bmm
         self.stats = collections.Counter()
+        self.log = None        # a list while a call trace is being recorded (kernel_trace)
 
     def __torch_function__(self, func, types, args=(), kwargs=None):
         kwargs = kwargs or {}
         name = _HANDLED.get(func)
         if name is not None:
             out = getattr(self, "_" + name)(*args, **kwargs)
+            if self.log is not None:
+                ts = [t for t in list(args) + list(kwargs.values()) if isinstance(t, torch.Tensor)]
+                self.log.append({"op": name, "handled": out is not NotImplemented,
+                                 "shapes": [tuple(t.shape) for t in ts],
+                                 "dtypes": [str(t.dtype).replace("torch.", "") for t in ts]})
             if out is not NotImplemented:
                 self.stats[name] += 1
                 return out
@@ -387,8 +517,19 @@ def _compile_kernel_path(name, bmm, model, example_inputs, options):
         with mode:
             return model(*inputs)
 
+    def kernel_trace(*inputs):
+        """Run once and return (output, calls): one record per intercepted GEMM-shaped call, in
+        program order, saying whether the kernel ran it or it fell back to PyTorch."""
+        mode.log = []
+        try:
+            out = run(*inputs)
+        finally:
+            calls, mode.log = mode.log, None
+        return out, calls
+
     secs = _warmup(run, example_inputs)
-    return Compiled(name, options, run, secs, stats=mode.stats, source_model=model, meta={})
+    return Compiled(name, options, run, secs, stats=mode.stats, source_model=model,
+                    meta={"kernel_trace": kernel_trace})
 
 
 # ---- Triton ----

@@ -1,10 +1,10 @@
 """Run TensorProgramCertifier end to end on real models and compiled programs.
 
-Pairs per task:
-  model vs eager / triton(split_k=4) / tilelang / onnxruntime_gpu
-  triton vs tilelang                  both known sequential FMA orders (Strategy 1, relational)
-  ONNX export vs ORT-optimized graph  ONNX Runtime's own fusions (FusedMatMul, BiasGelu, ...)
-  model vs torch_compile / tensorrt   extraction not implemented: must raise Unimplemented
+PyTorch eager is the reference (program 1) in every pair:
+  model vs eager / triton / triton(split_k=4) / tilelang / onnxruntime_gpu
+  model vs torch_compile   the graph Inductor compiled is extracted; there is no floating-point
+                           model for Inductor's kernels yet, so the result must be inconclusive
+  model vs tensorrt        extraction not implemented: must raise Unimplemented
 
 For every bounded result it samples the domain with utils.diff_testing (at the certified batch
 size) and checks soundness: the observed maximum error must not exceed the certified bound.
@@ -41,7 +41,7 @@ import utils  # noqa: E402
 from dlclv.certifier import TensorProgramCertifier  # noqa: E402
 from dlclv.stubs import Unimplemented  # noqa: E402
 
-MUST_MATCH = {"eager", "triton", "tilelang", "triton vs tilelang"}
+MUST_MATCH = {"eager", "triton", "tilelang"}
 CONFIG = {"assume_sum_of_products_conv": True}
 
 
@@ -65,6 +65,9 @@ def run_pair(label, p1, p2, dom, x, show, samples, extra=None):
     except Unimplemented as e:
         row.update(status="UNSUPPORTED", detail=str(e)[:160])
         return row
+    g2 = cert.extract_graphs()[1]
+    row["extraction"] = {k: g2.meta.get(k) for k in ("fidelity", "replay", "kernel_trace",
+                                                     "constants") if g2.meta.get(k)}
     m = cert.match()
     row.update(m.stats())
     row["regions"] = [f"{'+'.join(r.ops_1) or '-'} <-> {'+'.join(r.ops_2) or '-'}: {r.reason}"
@@ -118,29 +121,19 @@ def main():
         x = tuple(t.cuda() for t in dom.sample(1, torch.Generator().manual_seed(0)))
         if args.radius is not None:
             dom = utils.local_domain(dom, tuple(t[0] for t in x), args.radius)
-        pairs, compiled = [], {}
-        for name, opts in [("eager", {}), ("triton", {"split_k": 4}), ("tilelang", {}),
-                           ("onnxruntime_gpu", {}), ("torch_compile", {}), ("tensorrt", {})]:
+        pairs = []
+        for name, opts in [("eager", {}), ("triton", {}), ("triton", {"split_k": 4}),
+                           ("tilelang", {}), ("onnxruntime_gpu", {}), ("torch_compile", {}),
+                           ("tensorrt", {})]:
+            label = "model vs " + name + "".join(f" {k}={v}" for k, v in opts.items())
             try:
                 c = utils.load_compiler(name, **opts)(model, x)
             except Exception as e:
-                rows.append({"task": tid, "pair": f"model vs {name}", "status": "FAIL",
+                rows.append({"task": tid, "pair": label, "status": "FAIL",
                              "detail": f"compile: {type(e).__name__}: {e}"[:300]})
                 fails += 1
                 continue
-            compiled[name] = c
-            pairs.append((f"model vs {name}", model, c, name))
-            if name == "onnxruntime_gpu":
-                pairs.append(("onnx vs ort_optimized", c.meta["onnx"],
-                              c.meta["ort_optimized_onnx"], "ort_stage"))
-        try:
-            tri = utils.load_compiler("triton")(model, x)
-            if "tilelang" in compiled:
-                pairs.append(("triton vs tilelang", tri, compiled["tilelang"],
-                              "triton vs tilelang"))
-        except Exception as e:
-            rows.append({"task": tid, "pair": "triton vs tilelang", "status": "FAIL",
-                         "detail": f"compile: {type(e).__name__}: {e}"[:300]})
+            pairs.append((label, model, c, name))     # the eager model is always program 1
         for label, p1, p2, name in pairs:
             try:
                 row = run_pair(label, p1, p2, dom, x, args.show, args.samples, extra)
@@ -151,9 +144,15 @@ def main():
             if name in MUST_MATCH and row.get("status") == "PASS" and not row.get("complete"):
                 row["status"] = "FAIL"
                 row["detail"] = "same graph with different kernels did not match completely"
-            if name in ("torch_compile", "tensorrt") and row.get("status") != "UNSUPPORTED":
+            if name == "tensorrt" and row.get("status") != "UNSUPPORTED":
                 row["status"] = "FAIL"
                 row["detail"] = "expected Unimplemented extraction"
+            elif name == "torch_compile" and row.get("status") == "PASS" and (
+                    row.get("certify") != "inconclusive"
+                    or row.get("reason") != "unsupported_path"):
+                row["status"] = "FAIL"
+                row["detail"] = "Inductor kernels have no floating-point model: a bound here " \
+                                "would be unfounded"
             elif row.get("status") == "UNSUPPORTED":
                 row["status"] = "PASS"
                 row["certify"] = "extraction Unimplemented"
@@ -170,7 +169,7 @@ def main():
             if row.get("strategies"):
                 print(f"        orders: {row['strategies']}  relational units: "
                       f"{row.get('relational')}")
-        del model, pairs, compiled
+        del model, pairs
         torch.cuda.empty_cache()
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
     with open(args.out, "w") as f:

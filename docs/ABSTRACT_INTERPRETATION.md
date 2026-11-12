@@ -526,8 +526,17 @@ Not solved:
   - cuDNN 3×3 convolutions with 16 or 64 input channels: the masked inputs return `inf` or
     `nan`, so the algorithm is **not a summation tree of the products** (Winograd-like). The
     `assume_sum_of_products_conv` assumption is therefore doubtful for exactly these layers;
-  - cuBLAS `linear`: a tree is revealed, but the emulator does not reproduce the kernel on
-    most adversarial inputs, so the order cannot be treated as fixed.
+  - cuBLAS `linear`: **solved** (2026-11-12, `fprev.probe_eager_linear`). The kernel is a
+    fixed tree at each shape: short sequential chains combined pairwise (depth 7 at K = 64,
+    31 at K = 512, 45 at K = 4096), the bias added last. The earlier emulator failed because
+    it assumed one FMA rule for the whole tree: the first product of each chain is rounded on
+    its own and the others are fused. With one probe per leaf for that flag, the emulator
+    reproduces the kernel bit for bit on random and adversarial inputs. The evidence has
+    level "validated" (dynamic only) and is keyed by the exact call (shapes, source operator,
+    bias); `cert.probe_eager_orders()` collects it and `backsub` bounds the revealed tree per
+    element (`_signed_core`, mode "tree"). One linear layer, eager vs Triton, one sample:
+    6.2e-5 -> 5.8e-6 at K = 512 and 1.8e-3 -> 6.0e-5 at K = 4096. Convolutions still use the
+    any-order bound.
   The probe used batched calls, which can select a different algorithm than batch 1.
 
 ### Remaining assumptions and limits

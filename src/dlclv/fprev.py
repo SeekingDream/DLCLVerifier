@@ -282,3 +282,305 @@ def detect_fma(mm: Callable, device: str = "cuda", trials: int = 200, seed: int 
     if seen == {"separate"}:
         return "separate"
     return "either"
+
+
+# --------------------------------------------------------------------------------------------
+# Fast reveal: O(n log n) masked queries for balanced trees, n - 1 for a chain
+# --------------------------------------------------------------------------------------------
+
+def reveal_order_batched(lca_sizes: Callable[[List[tuple]], List[int]], n: int) -> SumTree:
+    """Rebuild a summation tree from LCA sizes, asking only for the pairs it needs.
+
+    `lca_sizes(pairs)` returns l(i, j) for each pair: the number of leaves under the lowest
+    common ancestor of leaves i and j (FPRev's masked-input measurement). The sizes l(p, j) of a
+    pivot leaf p against the other leaves of its subtree give the chain of p's ancestors: the
+    leaves with the same l hang off the same ancestor. Each such group is split into sibling
+    subtrees and rebuilt recursively. Every consistency check that fails raises `RevealError`.
+    """
+    import sys
+    if n == 1:
+        return SumTree(1, [])
+    cache: Dict[tuple, int] = {}
+
+    def sizes(p, js):
+        need = [j for j in js if (min(p, j), max(p, j)) not in cache]
+        if need:
+            got = lca_sizes([(p, j) for j in need])
+            for j, l in zip(need, got):
+                if not 2 <= l <= n:
+                    raise RevealError(f"LCA size {l} for the pair ({p}, {j})")
+                cache[min(p, j), max(p, j)] = int(l)
+        return [cache[min(p, j), max(p, j)] for j in js]
+
+    children: List[tuple] = []
+
+    def split(G, l):
+        """Partition G (the leaves that join p's ancestor of size l) into sibling subtrees."""
+        parts, G = [], list(G)
+        while G:
+            q, rest = G[0], G[1:]
+            ls = sizes(q, rest)
+            if any(x > l for x in ls):
+                raise RevealError("inconsistent LCA sizes inside a subtree")
+            parts.append([q] + [j for j, x in zip(rest, ls) if x < l])
+            G = [j for j, x in zip(rest, ls) if x == l]
+        return parts
+
+    def build(S):
+        if len(S) == 1:
+            return S[0]
+        p, rest = S[0], S[1:]
+        by = collections.defaultdict(list)
+        for j, l in zip(rest, sizes(p, rest)):
+            by[l].append(j)
+        cur, size = p, 1
+        for l in sorted(by):
+            if size + len(by[l]) != l:
+                raise RevealError(f"inconsistent LCA sizes: {size} + {len(by[l])} leaves "
+                                  f"under a node of {l}")
+            ids = [cur] + [build(P) for P in split(by[l], l)]
+            children.append(tuple(ids))
+            cur, size = n + len(children) - 1, l
+        if size != len(S):
+            raise RevealError("revealed structure does not cover the subtree")
+        return cur
+
+    old = sys.getrecursionlimit()
+    sys.setrecursionlimit(max(old, 4 * n + 200))
+    try:
+        build(list(range(n)))
+    finally:
+        sys.setrecursionlimit(old)
+    t = SumTree(n, children, name=f"fprev({n})")
+    t.queries = len(cache)
+    return t
+
+
+def tree_depth(t: SumTree) -> int:
+    total, d = t.n_total, {}
+    for k, ch in enumerate(t.children):
+        d[total + k] = 1 + max(d.get(c, 0) for c in ch)
+    return max(d.values()) if d else 0
+
+
+def emulate_dot(tree: SumTree, a: Sequence[float], b: Sequence[float], fused: Sequence[bool],
+                bias: Optional[float] = None, dtype: str = "float32") -> float:
+    """Value of a dot-product kernel with summation tree `tree`: leaf i is the product
+    a_i * b_i, rounded on its own unless `fused[i]` (then it enters its parent node unrounded,
+    as in fma(a_i, b_i, acc)). `bias` is added to the root with one more rounding."""
+    fmt = FORMATS[dtype]
+    rnd = lambda v: round_to_format(v, fmt)  # noqa: E731
+    n = tree.n
+    val: Dict[int, Fraction] = {}
+    for i in range(n):
+        p = Fraction(float(a[i])) * Fraction(float(b[i]))
+        val[i] = p if fused[i] else rnd(p)
+    for z in range(n, tree.n_total):
+        val[z] = Fraction(0)
+    for k, ch in enumerate(tree.children):
+        if sum(1 for c in ch if c < n and fused[c]) > 1:
+            raise RevealError("two fused products under one node: not an FMA")
+        val[tree.n_total + k] = rnd(sum((val[c] for c in ch), Fraction(0)))
+    out = val[tree.n_total + len(tree.children) - 1] if tree.children else rnd(val[0])
+    if bias is not None:
+        out = rnd(out + Fraction(float(bias)))
+    return float(out)
+
+
+# --------------------------------------------------------------------------------------------
+# PyTorch eager linear layer (cuBLAS on CUDA): y[r, c] = sum_k x[r, k] W[c, k] (+ b[c])
+# --------------------------------------------------------------------------------------------
+
+def linear_key(backend: str, a_shape, b_shape, source_op: str = "aten.linear",
+               bias: bool = True) -> tuple:
+    """Key of `CertifierConfig.order_evidence` for one matmul kernel call: the backend, the
+    operand shapes [..., K] and [K, N] of the canonical matmul, the source operator, and whether
+    its bias add is part of the same call."""
+    return (backend, "matmul", tuple(int(d) for d in a_shape), tuple(int(d) for d in b_shape),
+            source_op, bool(bias))
+
+
+def _pinned(device):
+    import torch
+    pin = {"torch": torch.__version__, "device": str(device)}
+    if str(device).startswith("cuda"):
+        pin["gpu"] = torch.cuda.get_device_name(torch.device(device))
+        pin["cuda"] = str(torch.version.cuda)
+        pin["tf32"] = str(torch.backends.cuda.matmul.allow_tf32)
+    return pin
+
+
+def probe_eager_linear(x_shape, out_features: int, bias: bool = True, device: str = "cuda",
+                       trials: int = 24, runs: int = 3, max_elements: int = 64,
+                       seed: int = 0) -> OrderEvidence:
+    """Reveal and validate the accumulation order of `F.linear(x, W, b)` in PyTorch eager, at
+    exactly these shapes on this device.
+
+    1. Tree: FPRev masks are placed in the weight rows (x = 1, so every product is exact), one
+       pair per output column and call.
+    2. Bias: its LCA with every product leaf must be the root, i.e. it is added last.
+    3. Products: one probe per leaf tells whether the product is rounded on its own or fused
+       into the accumulation (FMA).
+    4. Validation: an exact emulator of (tree, fused flags, bias last) must reproduce the kernel
+       bit for bit, on random and adversarial inputs, at every output element (or
+       `max_elements` evenly spaced ones), and the kernel must be deterministic across runs.
+
+    Any failed step raises `RevealError`: the order then stays unknown. The result has level
+    "validated": it rests on these dynamic checks only, so a certificate that uses it lists it
+    as an assumption (docs/ABSTRACT_INTERPRETATION.md, section 4.2).
+    """
+    import torch
+    import torch.nn.functional as F
+    x_shape = tuple(int(d) for d in x_shape)
+    K, N = x_shape[-1], int(out_features)
+    rows = int(np.prod(x_shape[:-1])) if len(x_shape) > 1 else 1
+    fmt = FORMATS["float32"]
+    Mv = mask_value(fmt, K + 1)
+    f32 = torch.float32
+
+    def run(x, W, b=None):
+        with torch.no_grad():
+            y = F.linear(torch.as_tensor(x, dtype=f32, device=device).reshape(x_shape),
+                         torch.as_tensor(W, dtype=f32, device=device),
+                         None if b is None else torch.as_tensor(b, dtype=f32, device=device))
+        return y.reshape(rows, N).double().cpu().numpy()
+
+    zero_b = np.zeros(N, np.float32) if bias else None
+    ones_x = np.ones((rows, K), np.float32)
+
+    def lca_sizes(pairs):
+        out = []
+        for s in range(0, len(pairs), N):
+            W = np.ones((N, K), np.float32)
+            for c, (i, j) in enumerate(pairs[s:s + N]):
+                W[c, i], W[c, j] = Mv, -Mv
+            y = run(ones_x, W, zero_b)[0]
+            for c in range(len(pairs[s:s + N])):
+                l = K - y[c]
+                if not float(l).is_integer():
+                    raise RevealError(f"kernel returned {y[c]} for a masked pair: not a fixed "
+                                      "summation tree of the products")
+                out.append(int(l))
+        return out
+
+    tree = reveal_order_batched(lca_sizes, K)
+    if tree.multiterm:
+        raise RevealError("revealed multi-term fused nodes: no IEEE model")
+
+    notes = [f"tree depth {tree_depth(tree)}, {tree.queries} masked pairs"]
+    if bias:                                     # the bias must join at the root
+        for s in range(0, K, N):
+            W = np.ones((N, K), np.float32)
+            b = np.zeros(N, np.float32)
+            cols = list(range(len(range(s, min(K, s + N)))))
+            for c in cols:
+                W[c, s + c], b[c] = Mv, -Mv
+            y = run(ones_x, W, b)[0]
+            if any(y[c] != 0.0 for c in cols):   # K + 1 leaves, all absorbed: l = K + 1
+                raise RevealError("the bias is not added last (it enters inside the tree)")
+        notes.append("bias added to the root with one rounding")
+
+    # Which products are fused: product a^2 = 1 + 2^-11 + 2^-24 is not representable; with the
+    # exact partner -(1 - 2^-24) the node returns 2^-11 + 2^-23 if the product enters unrounded
+    # and 2^-11 + 2^-24 if it was rounded first.
+    a = np.float32(1 + 2.0 ** -12)
+    partner_w = np.float32(-(1 - 2.0 ** -12))
+    sibling = {}
+    leaves_under = {}
+    for k, ch in enumerate(tree.children):
+        node = tree.n_total + k
+        leaves_under[node] = [x for c in ch for x in (leaves_under[c] if c >= tree.n_total
+                                                      else [c])]
+        for c in ch:
+            if c < K:
+                other = [d for d in ch if d != c][0]
+                sibling[c] = other if other < K else leaves_under[other][0]
+    fused = [False] * K
+    xa = np.full((rows, K), a, np.float32)
+    for s in range(0, K, N):
+        W = np.zeros((N, K), np.float32)
+        idx = list(range(s, min(K, s + N)))
+        for c, i in enumerate(idx):
+            W[c, i], W[c, sibling[i]] = a, partner_w
+        y = run(xa, W, zero_b)[0]
+        for c, i in enumerate(idx):
+            if y[c] == 2.0 ** -11 + 2.0 ** -23:
+                fused[i] = True
+            elif y[c] != 2.0 ** -11 + 2.0 ** -24:
+                raise RevealError(f"product probe of leaf {i} returned {y[c]!r}: neither a "
+                                  "rounded nor a fused product")
+    notes.append(f"{sum(fused)} of {K} products fused (FMA), the others rounded first")
+
+    rng = np.random.default_rng(seed)
+    elems = [(r, c) for r in range(rows) for c in range(N)]
+    if len(elems) > max_elements:
+        step = len(elems) / max_elements
+        elems = sorted({elems[int(t * step)] for t in range(max_elements)} | {elems[-1]})
+        notes.append(f"validated at {len(elems)} of {rows * N} output elements")
+    xs = adversarial_inputs(K, trials, rng)
+    for t in range(trials):
+        x = np.stack([xs[t]] + [rng.standard_normal(K).astype(np.float32)
+                                for _ in range(rows - 1)])
+        W = np.stack(adversarial_inputs(K, N, rng))[rng.permutation(N)]
+        if t % 5 in (1, 3, 4):                   # keep products finite and normal-ish
+            W = rng.standard_normal((N, K)).astype(np.float32)
+        b = rng.standard_normal(N).astype(np.float32) if bias else None
+        y = run(x, W, b)
+        for _ in range(runs - 1):
+            if run(x, W, b).tobytes() != y.tobytes():
+                raise RevealError("kernel is not deterministic across runs")
+        for r, c in elems:
+            want = emulate_dot(tree, x[r], W[c], fused, None if b is None else b[c])
+            got = y[r, c]
+            if not (got == want or (np.isnan(got) and abs(want) > fmt.max)
+                    or (np.isinf(got) and abs(want) > fmt.max)):
+                raise RevealError(f"emulated tree gives {want!r}, kernel gives {got!r} at "
+                                  f"output ({r}, {c}): the order is value dependent or the "
+                                  "floating-point model differs")
+    ev = OrderEvidence(tree, "either", "validated", K,
+                       kernel=f"torch eager F.linear x{list(x_shape)} W[{N}, {K}] "
+                              f"bias={bias} on {device}",
+                       pinned=_pinned(device), deterministic_runs=runs, emulator_trials=trials,
+                       notes=notes)
+    ev.fused = fused
+    ev.key = linear_key("eager", x_shape, (K, N), "aten.linear", bias)
+    return ev
+
+
+def eager_linear_evidence(graphs, device: str = "cuda", **probe_options):
+    """Probe every distinct PyTorch-eager `aten.linear` call of the given source graphs.
+
+    Returns (evidence, failures): `evidence` maps `linear_key` to `OrderEvidence`, ready for
+    `CertifierConfig.order_evidence`; `failures` maps the keys whose order could not be
+    established to the reason (those calls keep the any-order bound)."""
+    from .frontends import aten_name
+    evidence, failures = {}, {}
+    pin = (tuple(sorted(_pinned(device).items())), tuple(sorted(probe_options.items())))
+    for g in graphs:
+        for n in g.nodes.values():
+            if aten_name(n.op) != "aten.linear":
+                continue
+            if (n.meta.get("impl") or g.meta.get("impl") or {}).get("backend") != "eager":
+                continue
+            x, w = g.values[n.inputs[0]], g.values[n.inputs[1]]
+            if x.dtype != "float32" or w.dtype != "float32" or len(w.shape) != 2:
+                continue
+            has_bias = len(n.inputs) > 2 and n.inputs[2] is not None
+            key = linear_key("eager", x.shape, (w.shape[1], w.shape[0]), "aten.linear", has_bias)
+            if key in evidence or key in failures:
+                continue
+            if (key, pin) not in _PROBED:         # one probe per kernel call and device
+                try:
+                    _PROBED[key, pin] = probe_eager_linear(x.shape, w.shape[0], has_bias,
+                                                           device, **probe_options)
+                except RevealError as e:
+                    _PROBED[key, pin] = str(e)
+            got = _PROBED[key, pin]
+            if isinstance(got, str):
+                failures[key] = got
+            else:
+                evidence[key] = got
+    return evidence, failures
+
+
+_PROBED: Dict[tuple, object] = {}

@@ -239,6 +239,21 @@ class SumTree:
         build(nested)
         return cls(n, ch)
 
+    def levels(self):
+        """Internal nodes grouped by height, for vectorized bottom-up passes over a binary
+        tree: a list of (node ids, left child ids, right child ids). Every child of a group is
+        a leaf or belongs to an earlier group."""
+        if getattr(self, "_levels", None) is None:
+            if self.multiterm:
+                raise ValueError("multi-term fused nodes have no IEEE model")
+            total, height, groups = self.n_total, {}, {}
+            for k, (a, b) in enumerate(self.children):
+                h = 1 + max(height.get(a, 0), height.get(b, 0))
+                height[total + k] = h
+                groups.setdefault(h, []).append((total + k, a, b))
+            self._levels = [tuple(list(col) for col in zip(*groups[h])) for h in sorted(groups)]
+        return self._levels
+
     def to_nested(self):
         total = self.n_total
 

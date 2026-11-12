@@ -62,17 +62,40 @@ res = cert.certify()            # verified | bounded | inconclusive (with a reas
 print(res.summary(), res.assumptions)
 ```
 
-- `{"reference": "exact"}` bounds `|prog_2 - exact arithmetic on prog_1's graph|` instead. Use it
-  for "model vs compiled": the eager model's own summation order is unknown, and bounding it
-  makes the two-program bound vacuous.
-- Graphs come from `torch.export`, ONNX files, ONNX Runtime's optimized graph, and the `eager`,
-  `triton`, `tilelang` and `onnxruntime_gpu` paths. TensorRT and `torch.compile` are not
-  extractable yet.
+- Two references are supported:
+  - `{"reference": "eager"}`: bounds `|prog_2 - eager model|`. Program 1 must be the eager
+    model. The accumulation order of each of its kernels is either known or rebuilt from the
+    kernel by a probe (`probe_eager_orders`, run automatically); an operation whose order
+    cannot be established is bounded over every order and listed in `result.notes`
+    (`require_known_orders=True` returns `inconclusive` instead).
+  - `{"reference": "exact"}`: bounds `|prog_2 - F|`, where `F` is the eager model's graph in
+    exact real arithmetic. It does not depend on the eager kernels, so it stays finite where
+    their orders are unknown (convolutions).
+- PyTorch eager is the reference: `prog_1` is the eager model in every pair.
+- Graphs (`src/dlclv/frontends.py`) come from `torch.export` for the eager model, ONNX files,
+  ONNX Runtime's optimized graph, and the `triton`, `tilelang`, `onnxruntime_gpu` and
+  `torch_compile` paths. TensorRT is not extractable yet.
+  - `triton` / `tilelang`: an operation is labelled with the kernel only when the path's own
+    call trace says the kernel ran it; a call that fell back to PyTorch keeps the eager label.
+  - `torch_compile`: the graph is the ATen graph AOTAutograd handed to Inductor, captured during
+    the compilation that built the artifact. Inductor's kernels (fusion, reduction order, FMA
+    contraction) have no floating-point model yet, so `certify()` returns `inconclusive`
+    (`unsupported_path`) and claims no bound.
+  - Every extraction runs the real program once and compares it with the extracted graph
+    (`graph.meta["fidelity"]`); a graph that does not reproduce its program is an error.
+  - A value computed from constants is folded only when its bits cannot depend on the
+    implementation. Random values and programs that mutate state are rejected or kept as nodes.
 - The two graphs are matched into units of corresponding operations, e.g. add+ReLU vs a fused
   kernel.
 - The difference is bounded per element by differential back-substitution (`method="backsub"`,
   the default). Accumulations use a known order (Triton/TileLang kernels, or FPRev evidence) or
   a bound over every admissible order, with node magnitudes taken from signed partial sums.
+- `cert.probe_eager_orders()` rebuilds the accumulation tree of the eager linear layers from
+  the kernel itself (FPRev masks, then bit-exact emulation) and uses it in place of the
+  any-order bound. The evidence is dynamic only, so each order used is listed in
+  `result.assumptions`.
+- `utils.search_max_diff` searches the domain for a large difference (box vertices, gradient
+  signs, hill climbing): a stronger lower bound than uniform sampling, never a certificate.
 - `guarantee="formal"` is a worst-case bound; `"probabilistic"` assumes independent mean-zero
   rounding errors and never yields `verified`.
 - Design and current precision: `docs/ABSTRACT_INTERPRETATION.md`. On ResNet18 at one sample:
@@ -134,6 +157,8 @@ CUDA_VISIBLE_DEVICES=7 python test/test_diff_testing.py
 CUDA_VISIBLE_DEVICES=7 python test/test_certifier_models.py # certify, then check vs diff_testing
 CUDA_VISIBLE_DEVICES=7 python test/test_certifier_models.py --tasks 2 --radius 0   # one sample
 CUDA_VISIBLE_DEVICES=7 python test/test_layer_bounds.py     # rounding bound vs real kernels
+CUDA_VISIBLE_DEVICES=7 python test/test_linear.py           # one linear layer, eager vs each path
+CUDA_VISIBLE_DEVICES=7 python test/test_lenet5.py           # LeNet-5, eager vs each path
 CUDA_VISIBLE_DEVICES=7 python test/test_fprev_gpu.py        # GEMM accumulation orders (FPRev)
 pytest                                                      # src/dlclv: matching, bounds, FPRev
 ```

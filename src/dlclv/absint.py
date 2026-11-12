@@ -55,6 +55,23 @@ EXACT_OPS = LAYOUT | {"relu", "neg", "abs", "max", "min", "where", "reduce_max",
                       "max_pool", "eq", "ne", "lt", "le", "gt", "ge", "and", "or", "not"}
 CORRECTLY_ROUNDED = {"add", "sub", "mul", "div", "sqrt", "cast"}
 DSL_BACKENDS = {"triton", "tilelang"}
+# Backends (node.meta["impl"]["backend"], or the graph's frontend) whose kernels this module has
+# a floating-point model for: every elementwise operation is one correctly rounded IEEE
+# operation run on its own, and reductions follow `OrderOracle`. A backend outside this set
+# (for example "inductor", whose generated kernels fuse operations and may contract a*b+c into
+# an FMA) must not be bounded with these rules.
+MODELED_BACKENDS = {"eager", "torch", "torch.export", "triton", "tilelang", "onnxruntime_gpu",
+                    "onnx"}
+
+
+def unmodeled_backends(match) -> list:
+    """Backends of the two matched programs that have no floating-point model here."""
+    found = set()
+    for g in (match.graph_1, match.graph_2):
+        found.add(g.meta.get("impl", {}).get("backend", g.frontend))
+        for n in g.nodes.values():
+            found.add(n.meta.get("impl", {}).get("backend", g.frontend))
+    return sorted(found - MODELED_BACKENDS)
 SWAPPED_SOURCE = {"aten.linear", "aten.matmul", "aten.mm", "aten.bmm", "aten.addmm",
                   "aten.conv1d", "aten.conv2d", "aten.convolution"}
 
@@ -206,14 +223,21 @@ class OrderOracle:
         self.cfg = config
         self.assumptions = assumptions
         self._seq = {}
+        self.unknown_orders = set()     # accumulations bounded over every order
 
     def _sequential(self, n):
         if n not in self._seq:
             self._seq[n] = fpm.SumTree.sequential(n, zero_init=True)
         return self._seq[n]
 
-    def _evidence(self, backend, op, n):
-        ev = (getattr(self.cfg, "order_evidence", None) or {}).get((backend, op))
+    def _evidence(self, backend, op, n, key=None):
+        """Evidence for one kernel call. `key` names the call exactly (backend, operand shapes,
+        source operator, bias: `fprev.linear_key`); the coarse key (backend, op) is the older
+        form and only checks the number of terms."""
+        evs = getattr(self.cfg, "order_evidence", None) or {}
+        ev = evs.get(key) if key is not None else None
+        if ev is None:
+            ev = evs.get((backend, op))
         if ev is None or ev.n != n:
             return None
         if ev.level == "known" or (ev.level == "validated" and
@@ -223,13 +247,13 @@ class OrderOracle:
             return ev.order()
         return None
 
-    def order(self, impl: dict, source_op: str, op: str, n: int):
+    def order(self, impl: dict, source_op: str, op: str, n: int, key=None):
         backend = impl.get("backend", "unknown")
         if op in ("matmul", "conv"):
             if backend in DSL_BACKENDS and _base_op(source_op) in SWAPPED_SOURCE and \
                     getattr(self.cfg, "trust_dsl_kernel_order", True):
                 return self._dsl_order(backend, impl, n)
-            ev = self._evidence(backend, op, n)
+            ev = self._evidence(backend, op, n, key)
             if ev is not None:
                 return ev
             if op == "conv" and not getattr(self.cfg, "assume_sum_of_products_conv", False):
@@ -241,8 +265,11 @@ class OrderOracle:
             if op == "conv":
                 self.assumptions.add(f"{backend} convolution is a sum of products "
                                      "(direct or implicit GEMM; no Winograd/FFT)")
+            self.unknown_orders.add(f"{backend} {_base_op(source_op) or op} ({n} terms)")
             return fpm.AnyTree("either")
         ev = self._evidence(backend, op, n)
+        if ev is None and n > 2:
+            self.unknown_orders.add(f"{backend} {_base_op(source_op) or op} ({n} terms)")
         return ev if ev is not None else fpm.AnyTree("separate")
 
     def _dsl_order(self, backend, impl, K):

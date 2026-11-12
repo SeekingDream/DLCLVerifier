@@ -8,7 +8,7 @@ class Unimplemented(NotImplementedError):
 
 class Frontend(ABC):
     """Extract a graph from one program. Implementations: frontends.TorchExportFrontend,
-    frontends.OnnxFrontend."""
+    frontends.OnnxFrontend, frontends.AotGraphFrontend (torch.compile)."""
     @abstractmethod
     def extract(self, model, path_config):
         raise Unimplemented
