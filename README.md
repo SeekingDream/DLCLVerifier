@@ -1,8 +1,9 @@
 # DLCLVerifier
 
-Evaluation code for certifying limits on silent numerical drift when a tensor program is
-optimized by a DL compiler or kernel DSL. **The verifier does not exist yet**; this repository has
-the models, compilers and differential testing it will be evaluated against.
+Certifies limits on silent numerical drift when a tensor program is optimized by a DL compiler
+or kernel DSL. The repository has the models, compilers and differential testing used for the
+evaluation, and a prototype certifier (`src/dlclv`, section "Certifier"). No baseline is
+integrated yet.
 
 ## Scope
 
@@ -61,15 +62,23 @@ res = cert.certify()            # verified | bounded | inconclusive (with a reas
 print(res.summary(), res.assumptions)
 ```
 
+- `{"reference": "exact"}` bounds `|prog_2 - exact arithmetic on prog_1's graph|` instead. Use it
+  for "model vs compiled": the eager model's own summation order is unknown, and bounding it
+  makes the two-program bound vacuous.
 - Graphs come from `torch.export`, ONNX files, ONNX Runtime's optimized graph, and the `eager`,
   `triton`, `tilelang` and `onnxruntime_gpu` paths. TensorRT and `torch.compile` are not
   extractable yet.
 - The two graphs are matched into units of corresponding operations, e.g. add+ReLU vs a fused
   kernel.
-- Each unit is interpreted with `[min, max, max_error]` triples. Accumulations use a known order
-  (Triton/TileLang kernels, or FPRev evidence) or a bound over every admissible order.
-- Design and current precision: `docs/ABSTRACT_INTERPRETATION.md`. The bounds are sound on every
-  model pair tested but still loose: one interval per tensor over the full input box.
+- The difference is bounded per element by differential back-substitution (`method="backsub"`,
+  the default). Accumulations use a known order (Triton/TileLang kernels, or FPRev evidence) or
+  a bound over every admissible order, with node magnitudes taken from signed partial sums.
+- `guarantee="formal"` is a worst-case bound; `"probabilistic"` assumes independent mean-zero
+  rounding errors and never yields `verified`.
+- Design and current precision: `docs/ABSTRACT_INTERPRETATION.md`. On ResNet18 at one sample:
+  pairs that agree bitwise certify at 0; against exact arithmetic the Triton and TileLang
+  programs certify formally at 0.07 to 0.5 for a 224×224 input (observed 3e-6), while programs
+  with unknown accumulation orders (eager, ONNX Runtime) still get vacuous bounds.
 
 ## Tasks
 
@@ -123,6 +132,8 @@ CUDA_VISIBLE_DEVICES=7 python test/test_load_data_model.py --data-num 8
 CUDA_VISIBLE_DEVICES=7 python test/test_load_compiler.py    # tasks x compilers, vs eager and fp64
 CUDA_VISIBLE_DEVICES=7 python test/test_diff_testing.py
 CUDA_VISIBLE_DEVICES=7 python test/test_certifier_models.py # certify, then check vs diff_testing
+CUDA_VISIBLE_DEVICES=7 python test/test_certifier_models.py --tasks 2 --radius 0   # one sample
+CUDA_VISIBLE_DEVICES=7 python test/test_layer_bounds.py     # rounding bound vs real kernels
 CUDA_VISIBLE_DEVICES=7 python test/test_fprev_gpu.py        # GEMM accumulation orders (FPRev)
 pytest                                                      # src/dlclv: matching, bounds, FPRev
 ```

@@ -529,9 +529,10 @@ def test_backsub_float64_analysis_matches_float32():
     model = mlp()
     x0 = ex((8,), n=1)
     dom = Ball(x0, 0.01)
-    b32 = TensorProgramCertifier(model, model, dom, {"example_inputs": x0}).certify()
-    b64 = TensorProgramCertifier(model, model, dom, {"example_inputs": x0,
-                                                     "analysis_dtype": "float64"}).certify()
+    cfg = {"example_inputs": x0, "assume_deterministic_kernels": False}
+    b32 = TensorProgramCertifier(model, model, dom, cfg).certify()
+    b64 = TensorProgramCertifier(model, model, dom, dict(cfg, analysis_dtype="float64")).certify()
+    assert b32.certified_bound > 0
     assert b32.certified_bound == pytest.approx(b64.certified_bound, rel=1e-2)
 
 
@@ -546,5 +547,118 @@ def test_backsub_known_dsl_orders_cancel():
     both = TensorProgramCertifier(tri, tl, dom, {"example_inputs": x0}).certify()
     assert both.status == "bounded" and both.certified_bound == 0.0, both.summary()
     one = TensorProgramCertifier(tri, eager, dom, {"example_inputs": x0}).certify()
-    none_ = TensorProgramCertifier(eager, eager, dom, {"example_inputs": x0}).certify()
+    none_ = TensorProgramCertifier(eager, eager, dom, {
+        "example_inputs": x0, "assume_deterministic_kernels": False}).certify()
     assert 0 < one.certified_bound < none_.certified_bound
+
+
+def test_backsub_identical_eager_kernels_are_bitwise_equal():
+    model = DeepCNN().eval()
+    x0 = (torch.rand(1, 3, 10, 10, generator=torch.Generator().manual_seed(0)),)
+    dom = Ball(x0, 0.01, 0.0, 1.0)
+    cfg = {"example_inputs": x0, "assume_sum_of_products_conv": True}
+    same = TensorProgramCertifier(model, model, dom, cfg).certify()
+    assert same.status == "bounded" and same.certified_bound == 0.0, same.summary()
+    assert any("deterministic" in a for a in same.assumptions)
+    off = TensorProgramCertifier(model, model, dom,
+                                 dict(cfg, assume_deterministic_kernels=False)).certify()
+    assert off.certified_bound > 0
+    assert not any("deterministic" in a for a in off.assumptions)
+
+
+# --------------------------------------------------------------------------------------------
+# Cancellation-aware node magnitudes (signed_accumulation, the default)
+# --------------------------------------------------------------------------------------------
+
+def signed_core(lo, hi, mode, zero, n):
+    from dlclv.backsub import BacksubAnalyzer
+    an = BacksubAnalyzer.__new__(BacksubAnalyzer)
+    an.prob = False
+    g = F32.gamma(n + 1) + (n + 2) * 2.0 ** -50
+    t = lambda v: torch.as_tensor(np.asarray(v, dtype=np.float64)).reshape(1, n, 1)  # noqa: E731
+    return float(an._signed_core(t(lo), t(hi), (mode, zero, g, 0.0, ()))[mode]) * U
+
+
+@pytest.mark.parametrize("n", [2, 3, 4, 5, 6])
+def test_signed_node_magnitudes_cover_every_tree(n):
+    rng = np.random.default_rng(100 + n)
+    seq = fpm.SumTree.sequential(n, zero_init=False)
+    trees = [fpm.SumTree.from_nested(t, n) for t in all_trees(range(n))]
+    for _ in range(20):
+        x = rand_inputs(rng, n)
+        X = np.abs(x.astype(np.float64))
+        exact = exact_sum(x)
+        anyb = signed_core(x, x, "any", True, n)
+        seqb = signed_core(x, x, "seq", False, n)
+        # never looser than the bounds on leaf magnitudes
+        assert anyb <= float(fpm.anytree_bound(X, F32, False)[0]) * (1 + 1e-9)
+        assert seqb <= float(fpm.sequential_bound(X, F32, False, zero_init=False)[0]) * (1 + 1e-9)
+        assert abs(float(Fraction(emulate(seq, x)) - exact)) <= seqb
+        for t in trees:
+            assert abs(float(Fraction(emulate(t, x)) - exact)) <= anyb
+
+
+def test_signed_node_magnitudes_cover_leaf_intervals():
+    rng = np.random.default_rng(7)
+    n = 5
+    trees = [fpm.SumTree.from_nested(t, n) for t in all_trees(range(n))]
+    seq = fpm.SumTree.sequential(n, zero_init=False)
+    for _ in range(10):
+        c = rand_inputs(rng, n)
+        r = (np.abs(c) * rng.uniform(0, 0.5, n)).astype(np.float32)
+        lo, hi = (c - r).astype(np.float32), (c + r).astype(np.float32)
+        anyb = signed_core(lo, hi, "any", True, n)
+        seqb = signed_core(lo, hi, "seq", False, n)
+        for _ in range(8):
+            x = np.clip((lo + rng.uniform(0, 1, n) * (hi - lo)).astype(np.float32), lo, hi)
+            exact = exact_sum(x)
+            assert abs(float(Fraction(emulate(seq, x)) - exact)) <= seqb
+            for t in trees:
+                assert abs(float(Fraction(emulate(t, x)) - exact)) <= anyb
+
+
+def test_signed_accumulation_is_tighter_end_to_end():
+    torch.manual_seed(0)
+    model = nn.Sequential(nn.Linear(64, 32), nn.ReLU(), nn.Linear(32, 8)).eval()
+    x0 = ex((64,), n=1)
+    dom = Ball(x0, 0.001)
+    tri = graph_with_impl(model, x0, {"backend": "triton", "split_k": 1, "block_k": 32})
+    tri4 = graph_with_impl(model, x0, {"backend": "triton", "split_k": 4, "block_k": 32})
+    eager = graph_with_impl(model, x0, None)
+    for p1, p2 in ((tri, eager), (tri, tri4)):
+        for guarantee in ("formal", "probabilistic"):
+            cfg = {"example_inputs": x0, "guarantee": guarantee}
+            new = TensorProgramCertifier(p1, p2, dom, cfg).certify()
+            old = TensorProgramCertifier(p1, p2, dom,
+                                         dict(cfg, signed_accumulation=False)).certify()
+            assert 0 < new.certified_bound < old.certified_bound, (guarantee, new.summary())
+
+
+# --------------------------------------------------------------------------------------------
+# reference="exact": program 2 against exact arithmetic on program 1's graph
+# --------------------------------------------------------------------------------------------
+
+def test_exact_reference_bounds_one_program_against_real_arithmetic(tmp_path):
+    model = DeepCNN().eval()
+    x0 = (torch.rand(1, 3, 10, 10, generator=torch.Generator().manual_seed(0)),)
+    dom = Ball(x0, 0.0, 0.0, 1.0)
+    cfg = {"example_inputs": x0, "assume_sum_of_products_conv": True}
+    ex_ = TensorProgramCertifier(model, model, dom, dict(cfg, reference="exact")).certify()
+    assert ex_.status == "bounded" and ex_.certified_bound > 0, ex_.summary()
+    assert any("exact real arithmetic" in a for a in ex_.assumptions)
+    import copy
+    with torch.no_grad():
+        y64 = copy.deepcopy(model).double()(x0[0].double())
+        err = float((model(*x0).double() - y64).abs().max())
+    assert err <= ex_.certified_bound
+    # program 1's rounding is not charged: about half of the two-program bound
+    two = TensorProgramCertifier(model, model, dom,
+                                 dict(cfg, assume_deterministic_kernels=False)).certify()
+    assert ex_.certified_bound < two.certified_bound
+    # a known-order program 2 does not inherit the unknown order of program 1
+    tri = graph_with_impl(model, x0, {"backend": "triton", "split_k": 1, "block_k": 32})
+    known = TensorProgramCertifier(model, tri, dom, dict(cfg, reference="exact")).certify()
+    assert 0 < known.certified_bound < ex_.certified_bound
+    with pytest.raises(ValueError):
+        TensorProgramCertifier(model, model, dom,
+                               dict(cfg, reference="exact", method="interval")).certify()

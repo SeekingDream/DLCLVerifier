@@ -56,15 +56,25 @@ class CertifierConfig:
     assume_sum_of_products_conv: bool = False   # library convs: no Winograd/FFT (assumption)
     order_evidence: Optional[Dict[tuple, Any]] = None  # (backend, op) -> fprev.OrderEvidence
     accept_validated_orders: bool = False  # accept FPRev orders with dynamic evidence only
+    reference: str = "program_1"           # program_1: bound |program 1 - program 2|
+                                           # exact: bound |program 2 - exact arithmetic on
+                                           #        program 1's graph| (backsub only)
     method: str = "backsub"                # backsub (per element, relational) | interval
     guarantee: str = "formal"              # formal (worst case) | probabilistic (backsub only)
     confidence: float = 1e-6               # probabilistic: failure probability lambda
     analysis_dtype: str = "float32"        # backsub coefficients: float32 (+inflation) | float64
-    backsub_tol: float = 1e-2              # back-substitute where forward bounds exceed this
+    backsub_tol: float = 1e-4              # back-substitute where the forward bound exceeds
+                                           # this fraction of the value (1e-2 is too loose:
+                                           # it makes ReLUs unstable and the bound cascades)
     backsub_memory: float = 1.6e10         # bytes per back-substitution batch (approximate)
     backsub_batch: int = 0                 # rows per batch (0: from backsub_memory)
     backsub_window: int = 0                # intermediate rows: back-substitute through at
                                            # most this many mixing layers (0: all)
+    assume_deterministic_kernels: bool = True   # one PyTorch eager kernel on bitwise-equal
+                                           # inputs gives bitwise-equal outputs (assumption)
+    relu_point_slope: bool = True          # unstable ReLU close to one side: slope 0 or 1
+    signed_accumulation: bool = True       # node magnitudes from signed partial sums
+                                           # (False: sums of leaf magnitudes)
 
     @classmethod
     def from_any(cls, configure) -> "CertifierConfig":
@@ -216,6 +226,10 @@ class TensorProgramCertifier:
             return inconclusive(Inconclusive.UNSUPPORTED_OPERATOR,
                                 f"match has {len(m.ambiguities)} ambiguities; set "
                                 "allow_ambiguous=True after reviewing them")
+        if cfg.reference not in ("program_1", "exact"):
+            raise ValueError(f"unknown reference {cfg.reference!r}")
+        if cfg.reference == "exact" and (cfg.method != "backsub" or cfg.interpreter is not None):
+            raise ValueError("reference='exact' needs method='backsub'")
         if cfg.method == "backsub" and cfg.interpreter is None:
             from .backsub import BacksubAnalyzer
             an = BacksubAnalyzer(m, self.input_domain, cfg, self.example_inputs())

@@ -12,8 +12,20 @@ An inconclusive result passes when it gives a reason; a bound below an observed 
 
     CUDA_VISIBLE_DEVICES=7 python test/test_certifier_models.py
     CUDA_VISIBLE_DEVICES=7 python test/test_certifier_models.py --tasks 0 2 --show
+    CUDA_VISIBLE_DEVICES=7 python test/test_certifier_models.py --tasks 2 --radius 0
+    CUDA_VISIBLE_DEVICES=7 python test/test_certifier_models.py --tasks 2 --radius 0 \
+        --configure '{"guarantee": "probabilistic"}'
+
+    CUDA_VISIBLE_DEVICES=7 python test/test_certifier_models.py --tasks 2 --radius 0 \
+        --configure '{"reference": "exact"}'
+
+--radius R certifies on the L-inf ball of radius R around the sample (0: the sample itself)
+instead of the task's global domain; --configure adds CertifierConfig fields. With
+reference=exact each "model vs X" bound is |X - exact arithmetic| and is checked against the
+model run in float64.
 """
 import argparse
+import copy
 import json
 import os
 import sys
@@ -39,10 +51,15 @@ def domain_for(tid, model):
     return utils.load_data(tid, 1, model)[1]
 
 
-def run_pair(label, p1, p2, dom, x, show, samples):
+def float64_program(model):
+    m64 = copy.deepcopy(model).double()
+    return lambda *xs: m64(*[x.double() if x.is_floating_point() else x for x in xs])
+
+
+def run_pair(label, p1, p2, dom, x, show, samples, extra=None):
     t = time.time()
     row = {"pair": label}
-    cert = TensorProgramCertifier(p1, p2, dom, dict(CONFIG, example_inputs=x))
+    cert = TensorProgramCertifier(p1, p2, dom, dict(CONFIG, example_inputs=x, **(extra or {})))
     try:
         cert.extract_graphs()
     except Unimplemented as e:
@@ -60,14 +77,17 @@ def run_pair(label, p1, p2, dom, x, show, samples):
     row["detail"] = res.detail[:300]
     row["bound"] = res.certified_bound
     row["assumptions"] = res.assumptions
-    row["strategies"] = sorted({a.get(f"order_{s}", "") for r in res.unit_reports
-                                for a in r.accumulations for s in (1, 2)} - {""})
-    row["relational"] = sum(1 for r in res.unit_reports for a in r.accumulations
-                            if a.get("D") is not None)
+    # per-accumulation reports exist for method="interval" only (backsub reports are dicts)
+    accs = [a for r in res.unit_reports for a in getattr(r, "accumulations", ())]
+    row["strategies"] = sorted({a.get(f"order_{s}", "") for a in accs for s in (1, 2)} - {""})
+    row["relational"] = sum(1 for a in accs if a.get("D") is not None)
     if res.status == "inconclusive" and res.inconclusive_reason is None:
         row.update(status="FAIL", detail="inconclusive without a reason")
+    if (extra or {}).get("reference") == "exact" and isinstance(p1, torch.nn.Module):
+        p1 = float64_program(p1)       # the bound is |p2 - exact|: observe against float64
     if res.output_triples is not None and callable(p1) and callable(p2) and samples:
-        obs = utils.diff_testing(p1, p2, samples, dom, batch_size=x[0].shape[0])
+        n = 1 if getattr(dom, "kind", "") == "point" else samples
+        obs = utils.diff_testing(p1, p2, n, dom, batch_size=x[0].shape[0])
         row["observed"] = obs
         if obs > res.certified_bound:
             row.update(status="FAIL", detail=f"UNSOUND: observed {obs:.3e} > bound "
@@ -85,14 +105,19 @@ def main():
     ap.add_argument("--tasks", type=int, nargs="*", default=[0, 2, 3, 6, 8, 10])
     ap.add_argument("--samples", type=int, default=64)
     ap.add_argument("--show", action="store_true")
+    ap.add_argument("--radius", type=float, default=None)
+    ap.add_argument("--configure", default="{}")
     ap.add_argument("--out", default=os.path.join(ROOT, "results", "runs", "certifier_models.json"))
     args = ap.parse_args()
     rows, fails = [], 0
+    extra = json.loads(args.configure)
     for tid in args.tasks:
         task = utils.get_task(tid)
         model = utils.load_model(tid)
         dom = domain_for(tid, model)
         x = tuple(t.cuda() for t in dom.sample(1, torch.Generator().manual_seed(0)))
+        if args.radius is not None:
+            dom = utils.local_domain(dom, tuple(t[0] for t in x), args.radius)
         pairs, compiled = [], {}
         for name, opts in [("eager", {}), ("triton", {"split_k": 4}), ("tilelang", {}),
                            ("onnxruntime_gpu", {}), ("torch_compile", {}), ("tensorrt", {})]:
@@ -118,7 +143,7 @@ def main():
                          "detail": f"compile: {type(e).__name__}: {e}"[:300]})
         for label, p1, p2, name in pairs:
             try:
-                row = run_pair(label, p1, p2, dom, x, args.show, args.samples)
+                row = run_pair(label, p1, p2, dom, x, args.show, args.samples, extra)
             except Exception as e:
                 traceback.print_exc()
                 row = {"pair": label, "status": "FAIL", "detail": f"{type(e).__name__}: {e}"[:400]}

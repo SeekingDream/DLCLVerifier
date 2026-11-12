@@ -120,6 +120,7 @@ class BacksubAnalyzer:
         self.max_rows = int(getattr(config, "backsub_batch", 0) or 0)
         self.window = int(getattr(config, "backsub_window", 0) or 0)
         self.prob = getattr(config, "guarantee", "formal") == "probabilistic"
+        self.exact_ref = getattr(config, "reference", "program_1") == "exact"
         self.lam = float(getattr(config, "confidence", 1e-6))
         self.kappa = 1.0
         self.st = _MatchState(match)
@@ -195,6 +196,11 @@ class BacksubAnalyzer:
         self.stats["last_backsub_D_sources"] = {k_: float(f"{v:.3g}") for k_, v in
                                                 self._contrib.most_common(6)}
         self.assumptions.add("IEEE 754 binary32/64, round to nearest even, gradual underflow")
+        if self.exact_ref:
+            self.assumptions.add("reference = exact real arithmetic on program 1's graph "
+                                 "(reference GELU/erf/tanh definitions); the bound is "
+                                 "|program 2 - exact|, and program 1's own rounding is not "
+                                 "part of it")
         if self.cdt != torch.float64:
             self.assumptions.add(f"back-substitution in float32 with relative inflation "
                                  f"{self.tau:g} per accumulation (analysis arithmetic)")
@@ -1163,6 +1169,19 @@ class BacksubAnalyzer:
             lo, hi = R(0)
             sl, sh = self._slope(op, n, lo, hi, [self.c0.get(i) for i in n.inputs])
             J["m"], J["r"] = (sl + sh) / 2, (sh - sl) / 2
+            if op == "relu" and getattr(self.cfg, "relu_point_slope", True):
+                # An unstable ReLU whose range lies mostly on one side: take the slope of that
+                # side (1 or 0). For a, a' in [lo, hi],
+                #   slope 1: |relu(a) - relu(a') - (a - a')| = |min(a,0) - min(a',0)|
+                #            <= min(|a - a'|, -lo)
+                #   slope 0: |relu(a) - relu(a')| <= min(|a - a'|, hi)
+                # which beats the midpoint slope's |a - a'| / 2 when the short side is short.
+                pos = (lo + hi) > 0
+                gap = torch.where(pos, (-lo).clamp(min=0), hi.clamp(min=0))
+                use = (sl != sh) & (gap < 0.25 * (hi - lo))
+                J["m"] = torch.where(use, pos.double(), J["m"])
+                J["r"] = torch.where(use, torch.zeros_like(J["r"]), J["r"])
+                J["gap"] = torch.where(use, gap, torch.full_like(gap, math.inf))
         elif op in ("mul", "div", "matmul", "max", "min", "abs"):
             rs = [R(i) for i in range(len(n.inputs))]
             J["mid"] = [(lo + hi) / 2 for lo, hi in rs]
@@ -1226,7 +1245,12 @@ class BacksubAnalyzer:
 
         if op in ("relu", "exp", "log", "sqrt", "rsqrt", "reciprocal", "tanh", "sigmoid", "erf",
                   "sin", "cos", "gelu", "silu", "pow"):
-            R = b[0] * self._jac(g, n)["r"]
+            J = self._jac(g, n)
+            R = b[0] * J["r"]
+            if "gap" in J:
+                gp = J["gap"].unsqueeze(0)
+                R = R + torch.where(torch.isfinite(gp), torch.minimum(b[0], gp),
+                                    torch.zeros_like(R))
         elif op == "mul":
             J = self._jac(g, n)
             R = 0
@@ -1617,10 +1641,17 @@ class BacksubAnalyzer:
     def _injections(self, u):
         """Per-element local bounds at the unit outputs: [0, rho1, rho2, D, rho64]."""
         torch = _torch()
-        rho = {j: self._side_rho(j, u) for j in (1, 2)}
+        if self.exact_ref:
+            # program 1 only defines the real-valued function: it contributes no rounding and
+            # nothing cancels against it, so D is program 2 versus exact arithmetic
+            import collections
+            rho = {1: collections.defaultdict(float), 2: self._side_rho(2, u)}
+            zero_D = False
+        else:
+            rho = {j: self._side_rho(j, u) for j in (1, 2)}
+            zero_D = self._relational_zero(u)
         r64 = self._ref_rho64(u)
         gap = self._idiom_gaps(u)
-        zero_D = self._relational_zero(u)
         out = {}
         for b in u.outputs:
             v = b.value_1
@@ -1630,6 +1661,8 @@ class BacksubAnalyzer:
                 out[v] = I
                 continue
             g1, g2 = gap.get(v, (0.0, 0.0))
+            if self.exact_ref:
+                g1 = 0.0
             I[KE1] = rho[1][v] + g1
             I[KE2] = rho[2][v] + g2
             if zero_D:
@@ -1704,9 +1737,15 @@ class BacksubAnalyzer:
         if sorted(k1.values()) != sorted(k2.values()):
             return False
         inv2 = {v: nid for nid, v in k2.items()}
+        det = getattr(self.cfg, "assume_deterministic_kernels", True)
+        same_kernel = False
         for nid in n1:
             a1, a2 = g1.nodes[nid], g2.nodes[inv2[k1[nid]]]
             if a1.op in EXACT_OPS or a1.op == "cast":
+                continue
+            ek = self._eager_kernel(1, a1) if det else None
+            if ek is not None and ek == self._eager_kernel(2, a2):
+                same_kernel = True       # one kernel, bitwise-equal inputs, equal attributes
                 continue
             if a1.op in ("matmul", "conv"):
                 o1 = self._order(1, a1, g1)
@@ -1718,7 +1757,30 @@ class BacksubAnalyzer:
             if a1.op in CORRECTLY_ROUNDED and self._separate(1, a1) and self._separate(2, a2):
                 continue
             return False
+        if same_kernel:
+            self.assumptions.add(
+                "PyTorch eager kernels are deterministic: the same operator on bitwise-equal "
+                "inputs (same attributes, shapes, device and process) returns bitwise-equal "
+                "results")
         return True
+
+    def _eager_kernel(self, j, node):
+        """The source operators behind a raw node when PyTorch's own kernels run all of them
+        (the model itself, or the operators a Triton/TileLang path leaves in place); else
+        None."""
+        st = self.st
+        if st.src[j].frontend != "torch.export":
+            return None
+        ops = []
+        for o in sorted(node.meta.get("origins", ())):
+            src = st.src[j].nodes.get(o)
+            if src is None:
+                return None
+            impl = src.meta.get("impl") or st.src[j].meta.get("impl") or {}
+            if impl.get("backend") != "eager":
+                return None
+            ops.append(src.op)
+        return tuple(sorted(ops)) or None
 
     def _separate(self, j, node):
         st = self.st
@@ -2070,8 +2132,10 @@ class BacksubAnalyzer:
         rho = self._order_sigma(order, X, fmt, products) if self.prob else \
             self._order_rho(order, X, fmt, products)
         if bias is not None and not isinstance(order, (fpm.Known, fpm.Chunks)):
+            # The bias may be a leaf anywhere in the tree: it lies under at most K nodes, and
+            # its parent repeats the weight of its sibling subtree (at most the total W).
             K = X("count")
-            rho = rho + u * (1 + fmt.gamma(K + 1)) * K * bias
+            rho = rho + u * (1 + fmt.gamma(K + 1)) * (K * bias + X("sum"))
         if op in ("reduce_mean", "avg_pool"):
             nterm = X("count")
             Y = _mag(*out_r)
@@ -2128,6 +2192,118 @@ class BacksubAnalyzer:
             out[("rw", a, b)] = Pr[:, -1]
         return out
 
+    # ---- cancellation-aware node magnitudes --------------------------------------------- #
+    #
+    # A node of a summation tree rounds the exact sum z of its two computed operands, and
+    # |fl(z) - z| <= half an ulp of z = u * pow2floor(|z|). With s the exact sum of the leaves
+    # under the node and W the sum of their magnitudes,
+    #
+    #     |z| <= |s| + (rounding accumulated below the node) <= |s| + gamma * W.
+    #
+    # The plain bound replaces |s| by W, which ignores that leaves of opposite sign cancel.
+    # Here |s| is bounded from the leaf *intervals* [lo_i, hi_i]:
+    #   known sequential chain: s is a prefix sum, so |s| <= max(|sum lo|, |sum hi|);
+    #   any tree: the leaves under a node are an unknown subset, so
+    #       |s| <= min(W_node, G),  G = max(sum_i max(hi_i, 0), sum_i max(-lo_i, 0)),
+    #   and by the lemma the j-th largest W_node of any tree is at most the sum of the
+    #   K - j + 1 largest leaf magnitudes. u * pow2floor(min(w, G) + gamma w) is nondecreasing
+    #   in w, so the sum over the nodes is largest for that tree.
+
+    @staticmethod
+    def _pow2floor(M):
+        """Largest power of two <= M, exactly (0 where M <= 0)."""
+        torch = _torch()
+        _, ex = torch.frexp(M)
+        return torch.where(M > 0, torch.ldexp(torch.ones_like(M), ex - 1), torch.zeros_like(M))
+
+    def _signed_core(self, lo, hi, spec):
+        """Sums over the tree nodes of pow2floor(node magnitude bound) for leaf intervals
+        lo, hi [rows, K, cols] (summed along K). `spec` = (mode, zero_init, gamma, keta,
+        ranges). Returns per (rows, cols):
+          "leaf"  sum_i pow2floor(|x_i|)                   (separately rounded products)
+          "seq"   sequential chain in natural order        (mode "seq")
+          "any"   the largest sum over all binary trees    (mode "any")
+          per range (a, b): ("seq", a, b), ("leaf", a, b) for a chain from 0 over leaves
+          a..b-1, and its exact sum's enclosure ("lo", a, b), ("hi", a, b), ("abs", a, b).
+        gamma multiplies the magnitude sum W of the node (accumulated rounding below it, plus
+        the rounding of this float64 evaluation); keta is added to every node magnitude."""
+        torch = _torch()
+        mode, zero, g_, keta, ranges = spec
+        K = lo.shape[1]
+        A = lo.abs().maximum(hi.abs())
+        up = 1 + 2.0 ** -40
+        p2 = lambda M: self._pow2floor(M * up)       # noqa: E731
+        sq = bool(self.prob)                           # second moments (probabilistic model)
+        la = p2(A)
+        out = {"leaf": la.sum(1)}
+        if sq:
+            out["leaf2"] = (la * la).sum(1)
+        del la
+        if mode == "seq":
+            PA = torch.cumsum(A, dim=1)
+            M = _mag(torch.cumsum(lo, dim=1), torch.cumsum(hi, dim=1))
+            M = torch.minimum(M, PA) + keta + g_ * (PA + keta)
+            M = p2(M if zero else M[:, 1:])
+            out["seq"] = M.sum(1)
+            if sq:
+                out["seq2"] = (M * M).sum(1)
+        elif mode == "any":
+            G = torch.maximum(hi.clamp(min=0).sum(1, keepdim=True),
+                              (-lo).clamp(min=0).sum(1, keepdim=True))
+            top = torch.cumsum(torch.sort(A, dim=1, descending=True).values, dim=1)[:, 1:]
+            M = torch.minimum(top, G * (1 + K * 2.0 ** -50)) + keta + g_ * (top + keta)
+            M = p2(M)
+            out["any"] = M.sum(1)
+            if sq:
+                out["any2"] = (M * M).sum(1)
+        for (a, b) in ranges:
+            if b <= a:
+                continue
+            PA = torch.cumsum(A[:, a:b], dim=1)
+            PL, PH = torch.cumsum(lo[:, a:b], dim=1), torch.cumsum(hi[:, a:b], dim=1)
+            M = torch.minimum(_mag(PL, PH), PA) + keta + g_ * (PA + keta)
+            M = p2(M)
+            out[("seq", a, b)] = M.sum(1)
+            la = p2(A[:, a:b])
+            out[("leaf", a, b)] = la.sum(1)
+            if sq:
+                out[("seq2", a, b)] = (M * M).sum(1)
+                out[("leaf2", a, b)] = (la * la).sum(1)
+            out[("lo", a, b)], out[("hi", a, b)], out[("abs", a, b)] = \
+                PL[:, -1], PH[:, -1], PA[:, -1]
+        return out
+
+    def _mm_signed(self, al, ah, bl, bh, spec):
+        """_signed_core over the leaves A[..., m, k] * B[..., k, n] of a matmul."""
+        torch = _torch()
+        K = al.shape[-1]
+        lead = torch.broadcast_shapes(al.shape[:-2], bl.shape[:-2])
+        M, N = al.shape[-2], bl.shape[-1]
+        al, ah = [t.expand(lead + (M, K)).reshape(-1, M, K) for t in (al, ah)]
+        bl, bh = [t.expand(lead + (K, N)).reshape(-1, K, N) for t in (bl, bh)]
+        a_point, b_point = torch.equal(al, ah), torch.equal(bl, bh)
+        res = {}
+        chunk = max(1, int(2e7 // max(1, K * N)))
+        for bi in range(al.shape[0]):
+            for m0 in range(0, M, chunk):
+                xl, xh = al[bi, m0:m0 + chunk, :, None], ah[bi, m0:m0 + chunk, :, None]
+                yl, yh = bl[bi, None, :, :], bh[bi, None, :, :]
+                if a_point or b_point:
+                    p1, p2 = (xl * yl, xl * yh) if a_point else (xl * yl, xh * yl)
+                    lo, hi = torch.minimum(p1, p2), torch.maximum(p1, p2)
+                else:
+                    p1, p2, p3, p4 = xl * yl, xl * yh, xh * yl, xh * yh
+                    lo = torch.minimum(torch.minimum(p1, p2), torch.minimum(p3, p4))
+                    hi = torch.maximum(torch.maximum(p1, p2), torch.maximum(p3, p4))
+                    del p3, p4
+                del p1, p2
+                for k_, v in self._signed_core(lo, hi, spec).items():
+                    if k_ not in res:
+                        res[k_] = torch.empty((al.shape[0], M, N), dtype=torch.float64,
+                                              device=self.dev)
+                    res[k_][bi, m0:m0 + chunk] = v
+        return {k_: v.reshape(lead + (M, N)) for k_, v in res.items()}
+
     # Leaf functions: X(kind) returns
     #   "count"  -> number of leaves K
     #   "sum"    -> sum_i X_i per output element
@@ -2170,6 +2346,11 @@ class BacksubAnalyzer:
                 return fix(self._sorted_weighted_mm(Am, Bm))
             if isinstance(kind, tuple) and kind[0] == "stats":
                 return {k_: fix(v) for k_, v in self._mm_stats(Am, Bm, kind[1]).items()}
+            if isinstance(kind, tuple) and kind[0] == "signed":
+                lead1 = lambda t: t.unsqueeze(0) if A1 else t        # noqa: E731
+                last1 = lambda t: t.unsqueeze(-1) if B1 else t       # noqa: E731
+                st = self._mm_signed(lead1(al), lead1(ah), last1(bl), last1(bh), kind[1])
+                return {k_: fix(v) for k_, v in st.items()}
             raise ValueError(kind)
         return f
 
@@ -2255,12 +2436,18 @@ class BacksubAnalyzer:
                 return self._sorted_weighted_conv(Xm, Wm, a)
             if isinstance(kind, tuple) and kind[0] == "stats":
                 return self._sorted_weighted_conv(Xm, Wm, a, stats_ranges=kind[1])
+            if isinstance(kind, tuple) and kind[0] == "signed":
+                return self._sorted_weighted_conv(Xm, Wm, a, signed=(xl, xh, wl, kind[1]))
             raise ValueError(kind)
         return f
 
-    def _sorted_weighted_conv(self, Xm, Wm, a, stats_ranges=None):
+    def _sorted_weighted_conv(self, Xm, Wm, a, stats_ranges=None, signed=None):
         torch = _torch()
         F = torch.nn.functional
+        if signed is not None:
+            xl, xh, w, spec = signed
+            if xl.dim() != 4:
+                xl, xh, w = xl.unsqueeze(2), xh.unsqueeze(2), w.unsqueeze(2)
         if Xm.dim() != 4:
             Xm, Wm = Xm.unsqueeze(2), Wm.unsqueeze(2)
             a = dict(a, stride=(1,) + tuple(a["stride"]), dilation=(1,) + tuple(a["dilation"]),
@@ -2286,10 +2473,31 @@ class BacksubAnalyzer:
         out = torch.empty((N, O, L), dtype=torch.float64, device=self.dev)
         stats = {}
         og = O // G
-        chunk_o = max(1, int(5e7 // max(1, K * L)))
+        chunk_o = max(1, int((2e7 if signed is not None else 5e7) // max(1, K * L)))
+        if signed is not None:
+            del cols
+            pad_ = (b[1], e[1], b[0], e[0])
+            cl = F.unfold(F.pad(xl, pad_), (kh, kw), a["dilation"], 0, a["stride"])
+            ch = F.unfold(F.pad(xh, pad_), (kh, kw), a["dilation"], 0, a["stride"])
+            cl, ch = cl.reshape(N, G, K, L), ch.reshape(N, G, K, L)
+            Ws = w.reshape(G, O // G, K)
+            stats_ranges = ()
         for ni in range(N):
             for gi in range(G):
                 for o0 in range(0, og, chunk_o):
+                    if signed is not None:
+                        wv = Ws[gi, o0:o0 + chunk_o, :, None]
+                        p1, p2 = wv * cl[ni, gi, None, :, :], wv * ch[ni, gi, None, :, :]
+                        st_ = self._signed_core(torch.minimum(p1, p2), torch.maximum(p1, p2),
+                                                spec)
+                        del p1, p2
+                        sl_ = slice(gi * og + o0, gi * og + o0 + wv.shape[0])
+                        for k_, v in st_.items():
+                            if k_ not in stats:
+                                stats[k_] = torch.empty((N, O, L), dtype=torch.float64,
+                                                        device=self.dev)
+                            stats[k_][ni, sl_] = v
+                        continue
                     leaves = Wf[gi, o0:o0 + chunk_o, :, None] * cols[ni, gi, None, :, :]
                     sl_ = slice(gi * og + o0, gi * og + o0 + leaves.shape[0])
                     if stats_ranges is None:
@@ -2335,6 +2543,11 @@ class BacksubAnalyzer:
 
             def view(t):
                 return t.reshape(out_shape)
+
+            def as_leaves(t):
+                tp = F.pad(t, p)
+                c_ = F.unfold(tp.reshape(N * C, 1, H, W), k_, 1, 0, st)[..., :Lout]
+                return c_.permute(0, 2, 1)
         else:
             axes = a.get("axes") or tuple(range(Xm.dim()))
             keep = [d for d in range(Xm.dim()) if d not in axes]
@@ -2345,6 +2558,9 @@ class BacksubAnalyzer:
 
             def view(t):
                 return t.reshape(out_shape)
+
+            def as_leaves(t):
+                return t.expand(Xm.shape).permute(*perm).reshape(-1, K)
         coef = torch.arange(1, K + 1, dtype=torch.float64, device=self.dev).clamp(max=K - 1)
         ramp = torch.arange(K, 0, -1, dtype=torch.float64, device=self.dev)
 
@@ -2368,6 +2584,10 @@ class BacksubAnalyzer:
             if isinstance(kind, tuple) and kind[0] == "stats":
                 st = self._leaf_stats(leaves.reshape(-1, K, 1), kind[1])
                 return {k_: view(v.reshape(-1)) for k_, v in st.items()}
+            if isinstance(kind, tuple) and kind[0] == "signed":
+                st = self._signed_core(as_leaves(xl).reshape(-1, K, 1),
+                                       as_leaves(xh).reshape(-1, K, 1), kind[1])
+                return {k_: view(v.reshape(-1)) for k_, v in st.items()}
             raise ValueError(kind)
         return f
 
@@ -2381,6 +2601,8 @@ class BacksubAnalyzer:
         K = X("count")
         if K <= 1:
             return (u * X("sum") + eta) if products else 0.0 * X("sum")
+        if getattr(self.cfg, "signed_accumulation", True):
+            return self._order_sigma_signed(order, X, fmt, products)
         ranges = tuple(order.ranges) if isinstance(order, fpm.Chunks) else ()
         st = X(("stats", ranges))
         g_ = (1 + fmt.gamma(K + 1)) ** 2
@@ -2409,8 +2631,124 @@ class BacksubAnalyzer:
                 var = var + 2 * u * u * st["sumsq"] + 2 * K * eta * eta
         return torch.sqrt(var)
 
+    def _order_sigma_signed(self, order, X, fmt, products):
+        """_order_sigma with the node magnitudes of `_signed_core`: the variance proxy is
+        sum_k (u pow2floor(M_k) + eta)^2 <= 2 u^2 sum_k pow2floor(M_k)^2 + tail."""
+        torch = _torch()
+        u, eta = fmt.u, fmt.eta
+        K = X("count")
+        g_ = fmt.gamma(K + 1) + (K + 2) * 2.0 ** -50
+        keta = K * eta if products else 0.0
+        tail = 2 * K * (u * K * eta * 2 + 2 * eta) ** 2
+        if isinstance(order, fpm.Known):
+            t = order.tree
+            if t.seq_order is None or list(t.seq_order) != list(range(t.n)) or t.n_zero != 1:
+                raise _unsupported_path("known non-sequential trees are bounded per tensor "
+                                        "only (use method='interval')")
+            st = X(("signed", ("seq", True, g_, keta, ())))
+            var = 2 * u * u * st["seq2"] + tail
+            if products and order.fp != "fma":
+                var = var + 2 * u * u * st["leaf2"] + 2 * K * eta * eta
+        elif isinstance(order, fpm.Chunks):
+            ranges = tuple((s, e) for s, e in order.ranges if e > s)
+            st = X(("signed", ("chunks", True, g_, keta, ranges)))
+            var = tail
+            mags, pos, neg = [], [], []
+            for (s, e), inner in zip(order.ranges, order.inner):
+                if e <= s:
+                    continue
+                var = var + 2 * u * u * st[("seq2", s, e)]
+                if products and (not isinstance(inner, fpm.Known) or inner.fp != "fma"):
+                    var = var + 2 * u * u * st[("leaf2", s, e)] + 2 * (e - s) * eta * eta
+                err = g_ * (st[("abs", s, e)] + keta) + keta
+                lo_c, hi_c = st[("lo", s, e)] - err, st[("hi", s, e)] + err
+                mags.append(_mag(lo_c, hi_c))
+                pos.append(hi_c.clamp(min=0))
+                neg.append((-lo_c).clamp(min=0))
+            S = len(mags)
+            if S > 1:
+                A = torch.stack(mags, -1)
+                G = torch.maximum(torch.stack(pos, -1).sum(-1, keepdim=True),
+                                  torch.stack(neg, -1).sum(-1, keepdim=True))
+                top = torch.cumsum(torch.sort(A, dim=-1, descending=True).values, dim=-1)[..., 1:]
+                gs = fmt.gamma(S) + S * 2.0 ** -50
+                M = self._pow2floor((torch.minimum(top, G * (1 + S * 2.0 ** -50)) + gs * top)
+                                    * (1 + 2.0 ** -40))
+                var = var + 2 * u * u * (M * M).sum(-1)
+        else:
+            st = X(("signed", ("any", True, g_, keta, ())))
+            var = 2 * u * u * st["any2"] + tail
+            if products:
+                var = var + 2 * u * u * st["leaf2"] + 2 * K * eta * eta
+        return torch.sqrt(var)
+
     def _order_rho(self, order, X, fmt, products):
         """Per-element rounding bound of an accumulation under an order model."""
+        if not getattr(self.cfg, "signed_accumulation", True):
+            return self._order_rho_abs(order, X, fmt, products)
+        torch = _torch()
+        u, eta = fmt.u, fmt.eta
+        K = X("count")
+        if K <= 1:
+            return (u * X("sum") + eta) if products else 0.0 * X("sum")
+        # gamma: rounding accumulated below a node, plus the float64 rounding of the leaf
+        # products and prefix sums of this analysis
+        g_ = fmt.gamma(K + 1) + (K + 2) * 2.0 ** -50
+        keta = K * eta if products else 0.0
+        if isinstance(order, fpm.Known):
+            t = order.tree
+            if t.seq_order is None or list(t.seq_order) != list(range(t.n)):
+                raise _unsupported_path("known non-sequential trees are bounded per tensor "
+                                        "only (use method='interval')")
+            zero = t.n_zero == 1
+            nodes = K if zero else K - 1
+            st = X(("signed", ("seq", zero, g_, keta, ())))
+            b = u * st["seq"]
+            if products:
+                b = b + nodes * eta
+                if order.fp != "fma":
+                    b = b + u * st["leaf"] + K * eta
+                elif not zero:
+                    b = b + u * X("max2") + eta
+            return b
+        if isinstance(order, fpm.Chunks):
+            ranges = tuple((s, e) for s, e in order.ranges if e > s)
+            st = X(("signed", ("chunks", True, g_, keta, ranges)))
+            total = 0.0
+            mags, pos, neg = [], [], []
+            for (s, e), inner in zip(order.ranges, order.inner):
+                if e <= s:
+                    continue
+                total = total + u * st[("seq", s, e)]
+                if products:
+                    total = total + (e - s) * eta
+                    if not isinstance(inner, fpm.Known) or inner.fp != "fma":
+                        total = total + u * st[("leaf", s, e)] + (e - s) * eta
+                # the computed chunk sum: its exact sum's enclosure widened by its rounding
+                err = g_ * (st[("abs", s, e)] + keta) + keta
+                lo_c, hi_c = st[("lo", s, e)] - err, st[("hi", s, e)] + err
+                mags.append(_mag(lo_c, hi_c))
+                pos.append(hi_c.clamp(min=0))
+                neg.append((-lo_c).clamp(min=0))
+            S = len(mags)
+            if S > 1:
+                A = torch.stack(mags, -1)
+                G = torch.maximum(torch.stack(pos, -1).sum(-1, keepdim=True),
+                                  torch.stack(neg, -1).sum(-1, keepdim=True))
+                top = torch.cumsum(torch.sort(A, dim=-1, descending=True).values, dim=-1)[..., 1:]
+                gs = fmt.gamma(S) + S * 2.0 ** -50
+                M = torch.minimum(top, G * (1 + S * 2.0 ** -50)) + gs * top
+                total = total + u * self._pow2floor(M * (1 + 2.0 ** -40)).sum(-1)
+            return total
+        # AnyTree (and Depth, bounded by AnyTree)
+        st = X(("signed", ("any", True, g_, keta, ())))
+        if products:
+            return u * st["any"] + (K - 1) * eta + u * st["leaf"] + K * eta
+        return u * st["any"]
+
+    def _order_rho_abs(self, order, X, fmt, products):
+        """The bound without cancellation: every node magnitude is the sum of the leaf
+        magnitudes below it (`signed_accumulation=False`)."""
         u, eta = fmt.u, fmt.eta
         K = X("count")
         if K <= 1:

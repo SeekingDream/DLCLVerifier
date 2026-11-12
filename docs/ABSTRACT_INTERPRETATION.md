@@ -1,6 +1,6 @@
 # Abstract interpretation stage
 
-Status: **implemented** (`src/dlclv/fpmodel.py`, `fprev.py`, `absint.py`; section 8). It fills
+Status: **implemented** (`src/dlclv/fpmodel.py`, `fprev.py`, `absint.py`, `backsub.py`; section 8). It fills
 `interpretation.UnitInterpreter.transfer`, which `TensorProgramCertifier.certify()` calls once per
 matched unit in dependency order (`interpretation.propagate`).
 
@@ -270,6 +270,72 @@ section 3 bounds each program's rounding separately; the known side's bound is v
 actual tree, and the unknown side's bound is valid for every tree in `𝒯`, which contains the
 actual one.
 
+### 5.4 Cancellation-aware node magnitudes
+
+Sections 4 and 5.2 bound a node's magnitude by `(1+γ)·W_k`, the sum of the leaf *magnitudes*
+below it. Leaves of opposite sign cancel, so the value a node actually rounds is much smaller.
+With `s_k` the exact sum of the leaves under node `k`:
+
+    |z_k| <= |s_k| + γ·W_k            (z_k: the exact sum of the two computed operands)
+    |fl(z_k) - z_k| <= u · pow2floor(|z_k|)     (half an ulp of z_k; pow2floor(z) <= z)
+
+`|s_k|` is bounded from the leaf **intervals** `[lo_i, hi_i]` (for a product, the interval
+product of weight and input range):
+
+| Order | Bound on `|s_k|` |
+|---|---|
+| Known sequential chain | `s_k` is a prefix sum: `max(|Σ_{i<=k} lo_i|, |Σ_{i<=k} hi_i|)` |
+| Chunks | the same inside each chunk; the combine uses the chunk sums' enclosures |
+| AnyTree | the leaves under `k` are an unknown subset: `min(W_k, G)` with `G = max(Σ_i max(hi_i, 0), Σ_i max(-lo_i, 0))` |
+
+For AnyTree, `w -> u·pow2floor(min(w, G) + γ·w)` is nondecreasing, so by the lemma the sum over
+the nodes is largest for the decreasing sequential tree, as before. Each bound is never larger
+than the one it replaces. The gain is large for known chains (prefix sums of mixed-sign products
+grow like a random walk, not like `k`), and at most 2× for AnyTree from `G` (an adversarial tree
+can add all positive leaves first), plus about 1.4× from `pow2floor`.
+
+The probabilistic model uses the same node magnitudes in its variance proxy
+`Σ_k (u·pow2floor(M_k))²`. `signed_accumulation=False` restores the magnitude-only bounds.
+
+### 5.5 Identical kernels on identical inputs
+
+A unit whose inputs are bitwise equal in both programs has bitwise-equal outputs when every
+operation in it is either exact, a correctly rounded operation run on its own, a pair of
+identical known trees (section 4.3), or **the same PyTorch eager kernel on both sides** (the
+model itself, or an operator that a Triton/TileLang path leaves in place). The last case is an
+assumption (run-to-run determinism of the kernel for equal inputs, attributes, shapes and
+device); it is listed in `result.assumptions` and can be switched off with
+`assume_deterministic_kernels=False`. It makes "model vs eager" and "Triton vs TileLang" certify
+at exactly 0, which is what is observed. It does not apply to ONNX Runtime graphs.
+
+### 5.6 Exact arithmetic as the reference (`reference="exact"`)
+
+`|program 1 - program 2|` needs a rounding bound for both programs. When program 1 is the eager
+model, its accumulation orders are unknown (and its cuDNN 3×3 convolutions are not summation
+trees, section 8), so its any-order bound dominates and cascades. With `reference="exact"`
+the certified quantity is
+
+    |program 2(x) - F(x)|,     F = program 1's graph evaluated in exact real arithmetic,
+
+for every `x` in the domain. Program 1 then only defines `F`: its kernels contribute no
+rounding, nothing is cancelled against it (section 5.5 and the relational case are off), and
+ranges use program 2's error only. The assumptions about program 1's kernels
+(`assume_sum_of_products_conv`, determinism) are no longer needed for it; operators that
+program 2 itself runs on eager kernels still use the any-order bounds.
+
+To compare two compiled programs under this reference, certify each against `F` and add the two
+bounds.
+
+### 5.7 Unstable ReLUs close to one side
+
+For `a, a'` in `[lo, hi]` with `lo < 0 < hi`, the midpoint slope ½ leaves a remainder of
+`|a - a'|/2`. When the range lies mostly on one side, the slope of that side is better:
+
+    slope 1:  |relu(a) - relu(a') - (a - a')| = |min(a,0) - min(a',0)| <= min(|a - a'|, -lo)
+    slope 0:  |relu(a) - relu(a')|                                     <= min(|a - a'|, hi)
+
+It is used when the short side is under a quarter of the range (`relu_point_slope`).
+
 ## 6. Example: a 4-term reduction
 
 Here `x_1..x_4` lie in `[0, 1]` (so each `X_i = 1`), fp32 RN, plain sums, `u = 2^-24`. Node
@@ -318,6 +384,7 @@ when its bound exceeds `ε`.
 | `fpmodel.py` | formats (`u`, `eta`), `SumTree`, order models `Known` / `AnyTree` / `Depth` / `Chunks`, `known_tree_bound`, `sequential_bound`, `anytree_bound` (the lemma), `relational_diff`, `bound`, the CUDA fp32 ULP table |
 | `fprev.py` | `reveal_order` (FPRev), exact IEEE emulation of a tree (`emulate`), `collect_evidence` (determinism plus bit-exact emulation on adversarial inputs, level `validated`), `OrderEvidence`, `matmul_sum_fn`, `detect_fma` |
 | `absint.py` | `FloatErrorInterpreter` (transfer functions), `OrderOracle`, `InconclusiveError` |
+| `backsub.py` | `BacksubAnalyzer` (`method="backsub"`, the default): per-element bounds by differential back-substitution (module docstring); the per-element accumulation bounds of sections 4, 5.2 and 5.4; the bitwise-equality rule of section 5.5; formal and probabilistic guarantees |
 | `certifier.py` | `certify()` returns `CertificationResult`: `verified`, `bounded` (no epsilon) or `inconclusive` with a reason; `assumptions` and their digest; per-unit reports |
 
 How a unit is interpreted (`FloatErrorInterpreter.transfer`):
@@ -375,25 +442,93 @@ Other transfer functions:
 
 ### Current precision
 
-| Pair | Bound | Observed |
-|---|---|---|
-| SqueezeNet, Triton vs TileLang | 8.8e13 | 0 |
-| SqueezeNet, model vs Triton | 1.2e19 | 7.6e-6 |
-| ResNet18, model vs Triton | 8.1e28 | 4.8e-6 |
+`method="backsub"` (the default), ResNet18, domain = one sample (`utils.local_domain(..., 0)`),
+RTX 6000 Ada, 2026-11-11. "Before" is the back-substitution analysis without sections 5.4 and
+5.5 and with `backsub_tol = 1e-2`.
 
-- For Triton vs TileLang, every conv unit has a difference bound of exactly 0 (identical known
-  trees). All of the bound comes from the eager average-pool, whose order is unknown on both
-  sides.
-- The bounds are sound but far from tight. Values are one interval per tensor over the whole
-  pixel box, so ranges grow by the absolute row sums of every layer.
-- Transformers (MiniLM, DistilBERT, GPT-2 ONNX) are inconclusive: the first `layer_norm` with
-  eps = 1e-12 gives a rounding bound that diverges over a box that allows zero variance. The
-  additive attention masks (`finfo.min`) also make softmax ranges unbounded.
+64×64 input:
 
-Next steps for precision:
-- per-element (or per-channel) intervals;
-- relational value domains (zonotopes or symbolic linear bounds) between units;
-- local input domains (balls around samples) rather than the global box.
+| Pair | Observed | Formal, before | Formal | Probabilistic, before | Probabilistic |
+|---|---|---|---|---|---|
+| model vs eager | 0 | 2.9e9 | **0** | 5.5e-2 | **0** |
+| Triton vs TileLang | 0 | 1.8e7 | **0** | 2.7e-2 | **0** |
+| Triton vs Triton `split_k=4` | 7.6e-6 | 1.2e7 | 0.14 | 3.6e-2 | 3.8e-4 |
+| model vs Triton | 1.3e-5 | 2.2e9 | 7.6e5 | 4.7e-2 | 1.4e-3 |
+
+224×224 input:
+
+| Pair | Observed | Formal | Probabilistic |
+|---|---|---|---|
+| model vs eager | 0 | 0 | 0 |
+| Triton vs TileLang | 0 | 0 | not run |
+| Triton vs Triton `split_k=4` | 5.7e-6 | 3.7 | not run |
+| model vs Triton | 5.7e-6 | 5.5e8 | 1.0e-3 |
+| model vs Triton `split_k=4` | 3.3e-6 | not run | 1.0e-3 |
+| model vs TileLang | 5.7e-6 | not run | 1.0e-3 |
+| SqueezeNet, model vs Triton | 3.8e-6 | not run | 3.7e-4 |
+
+A 224×224 pair takes 8 to 18 minutes.
+
+**Against exact arithmetic** (`reference="exact"`, section 5.6; formal; observed = error
+against the model run in float64; `test/test_certifier_models.py --radius 0 --configure
+'{"reference": "exact"}'`):
+
+| Program | 64×64 bound | 64×64 observed | 224×224 bound | 224×224 observed |
+|---|---|---|---|---|
+| Triton `split_k=4` | 3.2e-2 | 3.6e-6 | 6.9e-2 | 2.9e-6 |
+| Triton / TileLang (one chain) | 8.1e-2 | 7.8e-6 | 5.0e-1 | 3.6e-6 |
+| eager (unknown order) | 6.8e5 | 7.9e-6 | 7.9e7 | 4.0e-6 |
+| ONNX Runtime optimized graph (unknown order) | not run | | 1.3e8 | not measured |
+
+This is the formal answer for "model vs compiled": a compiled program with known orders gets a
+finite bound that does not depend on the eager kernels. It is still about 10⁴ to 10⁵ above the
+observed error, which is the cost of assuming every rounding error has the worst sign in every
+node, layer and element. `split_k=4` certifies tighter than one chain because four short
+chains have smaller partial sums.
+
+One layer, per element, bound / observed error against float64 (`test/test_layer_bounds.py`,
+median over the output; no element violates the bound):
+
+| Layer | Triton chain, magnitudes | Triton chain, signed (5.4) | eager, magnitudes | eager, signed |
+|---|---|---|---|---|
+| conv 7×7, K=147 | 340 | 27 to 37 | 550 to 620 | 270 to 290 |
+| conv 3×3, K=576 | 1400 | 53 to 75 | 2400 to 2500 | 1100 to 1200 |
+| conv 3×3, K=4608 | 11000 | 170 to 230 | 20000 to 22000 | 7700 to 9000 |
+| linear, K=512 | 1100 to 1200 | 50 to 69 | 5400 to 5900 | 2600 to 3100 |
+| linear, K=4096 | 9300 to 10000 | 130 to 200 | 60000 to 64000 | 22000 to 23000 |
+
+What this shows:
+
+- **Pairs that agree bitwise now certify at 0** (section 5.5).
+- **Known chains gain 9× to 70× per layer** from signed prefix sums, more for larger K; unknown
+  orders gain 2× to 3×.
+- **The two-program formal bound is still useless whenever the reference order is unknown**
+  ("model vs X"); use `reference="exact"` there. Every eager convolution injects the any-tree bound, the per-element error bound reaches
+  the size of the activations about two thirds of the way through the network, ReLUs become
+  unstable, and the bound cascades. With both orders known the cascade does not start at 64×64
+  (0.14) and only starts in the last layers at 224×224 (3.7).
+- **The probabilistic bound is 50× to 310× the observed error.**
+- `backsub_tol = 1e-2` let intermediate bounds grow to 1% of the activation before tightening
+  them, which was enough to start the cascade (2.9e-2 instead of 1.4e-3 for model vs Triton,
+  probabilistic). The default is now `1e-4`, which gives the same bound as `0`.
+- Windowed back-substitution is much looser: 8.7e15 with `backsub_window=2` at 224×224, against
+  2.3e11 for the older unwindowed analysis of the same pair. It is not a way to save time.
+
+Not solved:
+
+- **Transformers** (DistilBERT, one sample) stop with `unit u12: cannot bind raw input`, a
+  limitation of the per-program pass, before any bound is produced.
+- **L-inf balls**: at radius 1/255 the input-variation term `V` explodes for ResNet18 (2e15).
+- **Order evidence for the eager reference**, the one thing that would make "model vs X"
+  formal bounds finite. A probe (FPRev masks on the real kernels, batched) found:
+  - cuDNN convolutions with 3 input channels (3×3, 7×7) and 1×1 convolutions: a sequential
+    chain, reproduced bit for bit by the emulator;
+  - cuDNN 3×3 convolutions with 16 or 64 input channels: the masked inputs return `inf` or
+    `nan`, so the algorithm is **not a summation tree of the products** (Winograd-like). The
+    `assume_sum_of_products_conv` assumption is therefore doubtful for exactly these layers;
+  - cuBLAS `linear`: a tree is revealed, but the emulator does not reproduce the kernel on
+    most adversarial inputs, so the order cannot be treated as fixed.
+  The probe used batched calls, which can select a different algorithm than batch 1.
 
 ### Remaining assumptions and limits
 

@@ -258,9 +258,13 @@ def test_deferred_interpreter_stops_at_abstract_interpretation():
 
 def test_default_interpreter_bounds_a_complete_match():
     model = mlp()
-    res = TensorProgramCertifier(model, model, Box((8,)), {"batch_size": 2}).certify()
+    res = TensorProgramCertifier(model, model, Box((8,)), {
+        "batch_size": 2, "assume_deterministic_kernels": False}).certify()
     assert res.status == "bounded" and res.interpreter == "BacksubAnalyzer"
     assert 0 < res.certified_bound < 1e-3
+    # one eager model against itself: the same kernels on the same inputs
+    same = TensorProgramCertifier(model, model, Box((8,)), {"batch_size": 2}).certify()
+    assert same.status == "bounded" and same.certified_bound == 0.0
 
 
 def test_driver_runs_units_in_dependency_order():
