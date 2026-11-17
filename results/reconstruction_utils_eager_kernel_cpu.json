@@ -1,0 +1,94 @@
+{
+  "torch": "2.2.2",
+  "python": "3.9.16",
+  "device": "cpu",
+  "pretrained_weights": true,
+  "mode": "eager-kernel",
+  "seed": 20261031,
+  "random_samples": 10,
+  "image_edges": true,
+  "rows": [
+    {
+      "task": 0,
+      "model": "squeezenet_1_1",
+      "mode": "eager-kernel",
+      "status": "EMPIRICAL_AGREEMENT",
+      "evidence": {
+        "samples": 14,
+        "bitwise_equal": true,
+        "is_proof": false
+      },
+      "assumptions": [
+        "Strict export faithfully represents the source for the fixed input domain; Python side effects and export specializations are not proved.",
+        "Same CPU, PyTorch binary, dispatch and floating-point environment.",
+        "Eager execution only; no autocast, compiler, dispatch overrides or concurrent state changes.",
+        "Rounding mode and denormal handling remain unchanged (not introspectable here).",
+        "Source artifact has the stated eager ATen semantics; weights are frozen snapshots.",
+        "Library kernels are preserved as opaque eager calls, not lowered to arithmetic. Identical dispatch must select deterministic kernels for the fixed tensor layouts."
+      ],
+      "preserved_kernels": [
+        "aten.cat.default",
+        "aten.convolution.default",
+        "aten.max_pool2d_with_indices.default",
+        "aten.mean.dim",
+        "aten.relu.default"
+      ],
+      "universal_certificate": false
+    },
+    {
+      "task": 1,
+      "model": "mobilenet_v2",
+      "mode": "eager-kernel",
+      "status": "EMPIRICAL_AGREEMENT",
+      "evidence": {
+        "samples": 14,
+        "bitwise_equal": true,
+        "is_proof": false
+      },
+      "assumptions": [
+        "Strict export faithfully represents the source for the fixed input domain; Python side effects and export specializations are not proved.",
+        "Same CPU, PyTorch binary, dispatch and floating-point environment.",
+        "Eager execution only; no autocast, compiler, dispatch overrides or concurrent state changes.",
+        "Rounding mode and denormal handling remain unchanged (not introspectable here).",
+        "Source artifact has the stated eager ATen semantics; weights are frozen snapshots.",
+        "Library kernels are preserved as opaque eager calls, not lowered to arithmetic. Identical dispatch must select deterministic kernels for the fixed tensor layouts."
+      ],
+      "preserved_kernels": [
+        "aten._native_batch_norm_legit_no_training.default",
+        "aten.addmm.default",
+        "aten.convolution.default",
+        "aten.hardtanh.default",
+        "aten.mean.dim"
+      ],
+      "universal_certificate": false
+    },
+    {
+      "task": 2,
+      "model": "resnet18",
+      "mode": "eager-kernel",
+      "status": "EMPIRICAL_AGREEMENT",
+      "evidence": {
+        "samples": 14,
+        "bitwise_equal": true,
+        "is_proof": false
+      },
+      "assumptions": [
+        "Strict export faithfully represents the source for the fixed input domain; Python side effects and export specializations are not proved.",
+        "Same CPU, PyTorch binary, dispatch and floating-point environment.",
+        "Eager execution only; no autocast, compiler, dispatch overrides or concurrent state changes.",
+        "Rounding mode and denormal handling remain unchanged (not introspectable here).",
+        "Source artifact has the stated eager ATen semantics; weights are frozen snapshots.",
+        "Library kernels are preserved as opaque eager calls, not lowered to arithmetic. Identical dispatch must select deterministic kernels for the fixed tensor layouts."
+      ],
+      "preserved_kernels": [
+        "aten._native_batch_norm_legit_no_training.default",
+        "aten.addmm.default",
+        "aten.convolution.default",
+        "aten.max_pool2d_with_indices.default",
+        "aten.mean.dim",
+        "aten.relu.default"
+      ],
+      "universal_certificate": false
+    }
+  ]
+}

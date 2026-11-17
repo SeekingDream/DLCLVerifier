@@ -513,7 +513,7 @@ def load_compiler(compiler, **options):
     """Return `compile_fn(model, example_inputs) -> Compiled` for one GPU compilation path.
 
     `compiler` is an id or name from `compilers.COMPILERS`: 0 eager, 1 torch_compile,
-    2 onnxruntime_gpu, 3 tensorrt, 4 triton, 5 tilelang. `options` are that path's knobs,
+    2 onnxruntime_gpu, 3 tensorrt, 4 triton, 5 tilelang, 6 tvm. `options` are that path's knobs,
     e.g. `load_compiler("triton", block_k=64, split_k=4)` or `load_compiler(1, mode="max-autotune")`.
     `example_inputs` is one batch of inputs from the loader; TensorRT engines accept batches up to
     its size. Every path runs float32 with TF32 off. The returned object is called like the model.

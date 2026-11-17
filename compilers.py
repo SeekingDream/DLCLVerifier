@@ -14,6 +14,8 @@ Paths:
   4 triton           Every GEMM-shaped op (linear, matmul, bmm, addmm, conv1d/conv2d via im2col)
                      runs on a Triton kernel compiled by the Triton compiler.
   5 tilelang         The same ops run on a TileLang kernel compiled by TileLang.
+  6 tvm              torch.export, then TVM Relax: every operator is legalized to a TIR loop nest,
+                     scheduled for the GPU and compiled to CUDA kernels by TVM (no cuDNN/cuBLAS).
 
 With default options the triton and tilelang kernels both accumulate each dot product in k order
 in one fp32 accumulator, so they agree bitwise; tile sizes (block_*) do not change that order.
@@ -42,7 +44,7 @@ from torch.overrides import TorchFunctionMode
 WORK_DIR = os.environ.get("DLCLV_WORK_DIR", os.path.join(os.path.dirname(__file__), "work_dir"))
 
 COMPILERS = {0: "eager", 1: "torch_compile", 2: "onnxruntime_gpu", 3: "tensorrt",
-             4: "triton", 5: "tilelang"}
+             4: "triton", 5: "tilelang", 6: "tvm"}
 
 
 def strict_fp32():
@@ -528,8 +530,9 @@ def _compile_kernel_path(name, bmm, model, example_inputs, options):
         return out, calls
 
     secs = _warmup(run, example_inputs)
+    # "bmm" is the kernel entry point itself, for dlclv.lowering to probe and validate against.
     return Compiled(name, options, run, secs, stats=mode.stats, source_model=model,
-                    meta={"kernel_trace": kernel_trace})
+                    meta={"kernel_trace": kernel_trace, "bmm": bmm})
 
 
 # ---- Triton ----
@@ -604,6 +607,188 @@ def compile_tilelang(model, example_inputs, block_m=64, block_n=64, block_k=32, 
                                 example_inputs, opts)
 
 
+# --------------------------------------------------------------------------------------------
+# 6 tvm: Relax + TIR, compiled to CUDA kernels
+# --------------------------------------------------------------------------------------------
+
+def _import_tvm():
+    """TVM, either installed on its own or the build bundled with TileLang (which puts it on
+    sys.path when imported)."""
+    try:
+        import tvm
+    except ImportError:
+        import tilelang  # noqa: F401
+        import tvm
+    return tvm
+
+
+def _cuda_toolkit_on_path():
+    """TVM compiles its CUDA source with `nvcc`. Make sure the first nvcc on PATH belongs to a
+    toolkit that has its headers; otherwise put one from /usr/local/cuda-* (or $CUDA_HOME) that
+    matches PyTorch's CUDA major version first. Returns the toolkit's bin directory."""
+    import glob
+    import shutil
+
+    def complete(bindir):
+        root = os.path.dirname(bindir)
+        return bool(glob.glob(os.path.join(root, "include", "cuda_runtime.h"))
+                    or glob.glob(os.path.join(root, "targets", "*", "include", "cuda_runtime.h")))
+
+    # nvcc finds its headers relative to the directory it is started from, so a symlink in
+    # /usr/local/bin does not count: the toolkit's own bin directory has to be on PATH.
+    nvcc = shutil.which("nvcc")
+    if nvcc and complete(os.path.dirname(nvcc)):
+        return os.path.dirname(nvcc)
+    major = (torch.version.cuda or "").split(".")[0]
+    roots = [os.environ.get("CUDA_HOME"), os.environ.get("CUDA_PATH")]
+    roots += sorted(glob.glob(f"/usr/local/cuda-{major}*"), reverse=True)
+    if nvcc:
+        roots.append(os.path.dirname(os.path.dirname(os.path.realpath(nvcc))))
+    roots += sorted(glob.glob("/usr/local/cuda*"), reverse=True)
+    for root in roots:
+        b = os.path.join(root, "bin") if root else None
+        if b and os.path.isfile(os.path.join(b, "nvcc")) and complete(b):
+            os.environ["PATH"] = b + os.pathsep + os.environ.get("PATH", "")
+            return b
+    raise RuntimeError("no CUDA toolkit with nvcc and cuda_runtime.h found for TVM "
+                       "(set CUDA_HOME)")
+
+
+_TVM_SCHEDULES = ("fallback", "reduction", "default")
+
+
+def compile_tvm(model, example_inputs, schedule="fallback", fuse=False):
+    """Compile with TVM Relax for CUDA.
+
+    Stage 1 (kept in `meta["tvm_lowered"]`, the program TVM generates code from): import the
+    strict `torch.export` graph, legalize every operator to a TIR function, optionally fuse
+    operators (`fuse=True`: FuseOps + FuseTIR, as TVM's default pipeline does), and schedule
+    each loop nest for the GPU with `dlight`:
+
+    * schedule="fallback": `dlight.gpu.Fallback` only. Output elements are bound to GPU
+      threads; every reduction stays a serial loop over its reduce axes in the order of the
+      TIR, on one float32 accumulator per output element.
+    * schedule="reduction": `Reduction`, `GeneralReduction`, then `Fallback`: plain reductions
+      (sum, mean) get dlight's cross-thread reduction schedule; GEMMs and convolutions stay
+      as in "fallback".
+    * schedule="default": TVM's default rule list (Matmul, GEMV, Reduction, GeneralReduction,
+      Fallback): tiled GEMMs with shared-memory staging. The TVM build bundled with TileLang
+      0.1.15 fails to compile this schedule for CUDA (its loop vectorizer needs a target
+      query that the build does not register).
+
+    Stage 2: TVM's own dataflow-lowering and finalization passes, code generation and nvcc.
+    Nothing is dispatched to cuDNN or cuBLAS. Shapes are fixed to the example's.
+    """
+    import copy
+    if next(iter(list(model.parameters()) + list(model.buffers())), None) is None:
+        dev = example_inputs[0].device             # a model without weights: use the inputs'
+        if dev.type != "cuda":
+            raise NotImplementedError(f"tvm is a GPU path; inputs are on {dev}")
+    else:
+        dev = _require_cuda(model, "tvm")
+    if schedule not in _TVM_SCHEDULES:
+        raise ValueError(f"schedule must be one of {_TVM_SCHEDULES}")
+    tvm = _import_tvm()
+    toolkit = _cuda_toolkit_on_path()
+    from tvm import relax
+    from tvm.relax.frontend.torch import from_exported_program
+    from tvm.s_tir import dlight
+    import tvm.relax.backend.cuda.pipeline as cuda_pipeline
+    t = time.time()
+    # Constants must be CPU tensors for the importer; the weights are the same bits.
+    cpu_model = copy.deepcopy(model).cpu()
+    torch._dynamo.reset()
+    with torch.no_grad():
+        ep = torch.export.export(cpu_model, tuple(x.cpu() for x in example_inputs), strict=True)
+    mod = from_exported_program(ep, keep_params_as_input=False)
+    target = tvm.target.Target("cuda")
+    passes = list(cuda_pipeline.library_dispatch_passes(target)) + [relax.transform.LegalizeOps()]
+    if fuse:
+        passes += [relax.transform.AnnotateTIROpPattern(), relax.transform.FoldConstant(),
+                   relax.transform.FuseOps(), relax.transform.FuseTIR()]
+    rules = {"fallback": [], "reduction": [dlight.gpu.Reduction(), dlight.gpu.GeneralReduction()],
+             "default": [dlight.gpu.Matmul(), dlight.gpu.GEMV(), dlight.gpu.Reduction(),
+                         dlight.gpu.GeneralReduction()]}[schedule] + [dlight.gpu.Fallback()]
+    passes.append(dlight.ApplyDefaultSchedule(*rules))
+    with target:
+        lowered = tvm.transform.Sequential(passes)(mod)
+
+    @tvm.transform.module_pass(opt_level=0)
+    def finish(m, _ctx):
+        with target:
+            return tvm.transform.Sequential(list(cuda_pipeline.dataflow_lower_passes(target))
+                                            + list(cuda_pipeline.finalize_passes(target)))(m)
+
+    try:
+        executable = relax.build(lowered, target, relax_pipeline=finish)
+    except Exception as exc:
+        raise RuntimeError(f"TVM could not build schedule={schedule!r}, fuse={fuse} for CUDA: "
+                           f"{str(exc).strip().splitlines()[-1][:300]}") from exc
+    dev_id = dev.index if dev.index is not None else torch.cuda.current_device()
+    vm = relax.VirtualMachine(executable, tvm.cuda(dev_id))
+    main = vm["main"]
+
+    def run(*inputs):
+        out = main(*[tvm.runtime.from_dlpack(x.to(dev).contiguous()) for x in inputs])
+        outs = [out] if hasattr(out, "numpy") else list(out)
+        # The VM plans and reuses its storage: copy the results out.
+        res = [torch.from_dlpack(o).clone() for o in outs]
+        return res[0] if len(res) == 1 else tuple(res)
+
+    def cuda_source(module):
+        stack, out = [module], []
+        while stack:
+            m = stack.pop()
+            stack += list(getattr(m, "imports", None) or [])
+            if "cuda" in str(getattr(m, "kind", "")):
+                out.append(m.inspect_source())
+        return "\n".join(out)
+
+    state = {}
+
+    def tir_call(name, tensors):
+        """Run one TIR function of the lowered module on torch CUDA tensors (inputs, then the
+        outputs it writes in place). The functions are built on their own, with the same code
+        generator and nvcc as the program; `meta["tvm_kernel_source_identical"]()` says whether
+        every kernel's CUDA source is the same text as in the program."""
+        if "lib" not in state:
+            funcs = {}
+            for gv in lowered.get_global_vars():
+                f = lowered[gv]
+                if isinstance(f, tvm.tirx.PrimFunc):
+                    funcs[gv.name_hint] = f.with_attr("global_symbol", gv.name_hint)
+            built = tvm.tirx.build(tvm.IRModule(funcs), target=target)
+            state["source"] = cuda_source(built)
+            # Without LLVM the host side is C source: compile and load it, as the VM does.
+            import tempfile
+            d = os.path.join(WORK_DIR, "tvm")
+            os.makedirs(d, exist_ok=True)
+            path = os.path.join(tempfile.mkdtemp(dir=d), "kernels.so")
+            built.export_library(path)
+            state["lib"] = tvm.runtime.load_module(path)
+        state["lib"][name](*[tvm.runtime.from_dlpack(x) for x in tensors])
+        torch.cuda.synchronize(dev)
+
+    def kernel_source_identical():
+        """Every `extern "C" __global__` kernel of the standalone build appears verbatim in
+        the program's CUDA source."""
+        if "lib" not in state:
+            return None
+        import re
+        split = lambda src: {k.strip() for k in re.split(r'(?=extern "C" __global__)', src)  # noqa: E731
+                             if k.startswith('extern "C" __global__')}
+        mine, theirs = split(state["source"]), split(cuda_source(executable.mod))
+        return bool(mine) and mine <= theirs
+
+    secs = time.time() - t + _warmup(run, example_inputs)
+    opts = {"schedule": schedule, "fuse": fuse}
+    meta = {"tvm_lowered": lowered, "tvm_target": str(target), "tvm_version": tvm.__version__,
+            "tvm_cuda_source": cuda_source(executable.mod), "tir_call": tir_call,
+            "tvm_kernel_source_identical": kernel_source_identical, "nvcc": toolkit,
+            "device": dev}
+    return Compiled("tvm", opts, run, secs, source_model=model, meta=meta)
+
+
 BACKENDS = {"eager": compile_eager, "torch_compile": compile_torch,
             "onnxruntime_gpu": compile_ort, "tensorrt": compile_tensorrt,
-            "triton": compile_triton, "tilelang": compile_tilelang}
+            "triton": compile_triton, "tilelang": compile_tilelang, "tvm": compile_tvm}

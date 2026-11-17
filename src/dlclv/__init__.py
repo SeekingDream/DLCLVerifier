@@ -2,8 +2,9 @@
 
 Implemented: config validation, outcome rules, graph extraction (`frontends`), canonical lowering
 (`canonical`), graph matching (`matching`), the floating-point error model (`fpmodel`), FPRev
-order revelation (`fprev`), abstract interpretation of matched units (`absint`), and the
-certifier driver (`certifier`).
+order revelation (`fprev`), abstract interpretation of matched units (`absint`), the
+certifier driver (`certifier`), and the bitwise reconstruction frontend (`reconstruction`,
+`lowering`, `primitives`).
 NOT implemented: an independent certificate checker, baseline adapters, and experiment runners.
 """
 __version__ = "0.0.3"

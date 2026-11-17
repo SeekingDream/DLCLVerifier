@@ -141,3 +141,13 @@ paths:
     stages: [torch_function_dispatch, tilelang_tir, cuda_c]
     configuration: {accumulation: explicit fp32 FMA, knobs: [block_m, block_n, block_k, num_stages, threads, split_k]}
     known_blockers: [T.gemm uses TF32 for float32 inputs, so it is not used]
+  - id: tvm_relax
+    tier: core
+    status: pilot
+    system: TVM Relax (every operator legalized to TIR, scheduled with dlight, CUDA codegen)
+    target: NVIDIA GPU
+    stages: [torch_export, relax, tir_scheduled, cuda_c]
+    configuration: {schedule: [fallback, reduction, default], fuse: [false, true], libraries: none}
+    known_blockers:
+      - TileLang's bundled TVM 0.25.dev0 cannot build schedule=default for CUDA (vectorized loops)
+      - schedule=reduction lowers cross-thread reductions after the kept TIR; not reconstructed

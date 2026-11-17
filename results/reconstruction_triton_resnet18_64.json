@@ -1,0 +1,102 @@
+{
+  "torch": "2.6.0+cu124",
+  "python": "3.11.18",
+  "device": "cuda",
+  "compiler": "triton",
+  "options": {
+    "split_k": 1
+  },
+  "image_size": 64,
+  "pretrained_weights": true,
+  "mode": "eager-kernel",
+  "seed": 20261031,
+  "random_samples": 4,
+  "image_edges": true,
+  "rows": [
+    {
+      "task": 2,
+      "model": "resnet18",
+      "mode": "eager-kernel",
+      "compiler": "triton",
+      "options": {
+        "split_k": 1
+      },
+      "status": "EMPIRICAL_AGREEMENT",
+      "evidence": {
+        "samples": 8,
+        "bitwise_equal": true,
+        "is_proof": false
+      },
+      "assumptions": [
+        "Strict export faithfully represents the source for the fixed input domain; Python side effects and export specializations are not proved.",
+        "The triton path runs the source model's Python with only the traced GEMM-shaped calls replaced; every other operation is the PyTorch eager call of the exported graph.",
+        "Same device, PyTorch binary, dispatch and floating-point environment.",
+        "Eager execution only; no autocast, compiler, dispatch overrides or concurrent state changes.",
+        "Rounding mode stays round-to-nearest-even (not introspectable here); gradual underflow was measured on this device when the program was built and is re-checked on every call.",
+        "Each explicit primitive is one correctly rounded IEEE 754 operation in its dtype, and separate eager calls are never contracted into a fused operation.",
+        "Source artifact has the stated eager ATen semantics; weights are frozen snapshots.",
+        "The triton compiler lowers the kernel in kernels.py to one float32 accumulator per output element updated by a fused multiply-add in increasing k, for every tile and every output position (kernel source; FPRev chain, FMA probe and bitwise validation on this device agree).",
+        "The bias addition after the kernel is one correctly rounded float32 addition.",
+        "Library kernels are preserved as opaque eager calls, not lowered to arithmetic. Identical dispatch must select deterministic kernels for the fixed tensor layouts."
+      ],
+      "preserved_kernels": [
+        "aten.adaptive_avg_pool2d.default",
+        "aten.batch_norm.default",
+        "aten.max_pool2d.default",
+        "aten.relu.default"
+      ],
+      "lowered_kernels": 21,
+      "lowering_levels": [
+        "known"
+      ],
+      "lowering_failures": {},
+      "lowered_examples": [
+        {
+          "node": "conv2d",
+          "target": "aten.conv2d.default",
+          "kernel": "triton GEMM kernel {'block_m': 64, 'block_n': 64, 'block_k': 32, 'split_k': 1, 'num_warps': 4, 'num_stages': 3}",
+          "arithmetic": "conv2d -> bmm [1, 64, 147] @ [.., 147, 1024]: per output element acc = +0; acc = fma(a[m,k], b[k,n], acc) for k increasing over [(0, 147)]; one fma(+0, +0, acc) for the masked tail; im2col by zero padding and strided slices; bias (if any) added afterwards with one rounding",
+          "level": "known",
+          "evidence": "{'static': 'kernels.triton_bmm_kernel: `acc = tl.zeros(...)`, then `acc = tl.dot(a, b, acc, input_precision=\"ieee\")` for k blocks in increasing order with loads masked to 0.0 beyond k_hi; compilers.triton_bmm: split_k partial results, `c.sum(1)`.', 'K': 147, 'fprev': 'k-sequential chain (146 masked pairs)', 'fma_probe': 'fma', 'validation_inputs': 5}"
+        },
+        {
+          "node": "conv2d_1",
+          "target": "aten.conv2d.default",
+          "kernel": "triton GEMM kernel {'block_m': 64, 'block_n': 64, 'block_k': 32, 'split_k': 1, 'num_warps': 4, 'num_stages': 3}",
+          "arithmetic": "conv2d -> bmm [1, 64, 576] @ [.., 576, 256]: per output element acc = +0; acc = fma(a[m,k], b[k,n], acc) for k increasing over [(0, 576)]; im2col by zero padding and strided slices; bias (if any) added afterwards with one rounding",
+          "level": "known",
+          "evidence": "{'static': 'kernels.triton_bmm_kernel: `acc = tl.zeros(...)`, then `acc = tl.dot(a, b, acc, input_precision=\"ieee\")` for k blocks in increasing order with loads masked to 0.0 beyond k_hi; compilers.triton_bmm: split_k partial results, `c.sum(1)`.', 'K': 576, 'fprev': 'k-sequential chain (575 masked pairs)', 'fma_probe': 'fma', 'validation_inputs': 5}"
+        }
+      ],
+      "lowered_primitive_ops": {
+        "aten._to_copy.default": 126544,
+        "aten.abs.default": 31636,
+        "aten.add.Tensor": 63273,
+        "aten.bitwise_and.Scalar": 31636,
+        "aten.bitwise_and.Tensor": 63272,
+        "aten.constant_pad_nd.default": 17,
+        "aten.detach.default": 31636,
+        "aten.eq.Scalar": 31636,
+        "aten.full_like.default": 31636,
+        "aten.gt.Scalar": 31636,
+        "aten.mul.Tensor": 31636,
+        "aten.ne.Scalar": 31636,
+        "aten.ne.Tensor": 31636,
+        "aten.neg.default": 31636,
+        "aten.nextafter.default": 31636,
+        "aten.permute.default": 40,
+        "aten.slice.Tensor": 127324,
+        "aten.stack.default": 20,
+        "aten.sub.Tensor": 126544,
+        "aten.t.default": 1,
+        "aten.unsqueeze.default": 1,
+        "aten.view.default": 122,
+        "aten.view.dtype": 31636,
+        "aten.where.self": 63272,
+        "aten.zeros.default": 21,
+        "aten.zeros_like.default": 1
+      },
+      "universal_certificate": false
+    }
+  ]
+}

@@ -1,0 +1,83 @@
+{
+  "python": "3.9.16",
+  "torch": "2.2.2",
+  "torchvision": "0.17.2",
+  "device": "cpu",
+  "seed": 20261031,
+  "pretrained_weights": true,
+  "rows": [
+    {
+      "task": 0,
+      "model": "squeezenet_1_1",
+      "reference_samples": 5,
+      "reference_shape": [
+        1,
+        1000
+      ],
+      "reference_all_finite": true,
+      "reference_repeat_bitwise_equal": true,
+      "strict_export_bitwise_equal": true,
+      "unsupported_operator_counts": {
+        "aten.div.Tensor": 1,
+        "aten.convolution.default": 26,
+        "aten.relu.default": 26,
+        "aten.max_pool2d_with_indices.default": 3,
+        "<built-in function getitem>": 3,
+        "aten.cat.default": 8,
+        "aten.mean.dim": 1
+      },
+      "status": "UNSUPPORTED",
+      "reason": "div: aten.div.Tensor: need lowered arithmetic/kernel semantics; opaque reductions, GEMM, FMA and hardware MMA are unsupported",
+      "reconstruction_samples": 0
+    },
+    {
+      "task": 1,
+      "model": "mobilenet_v2",
+      "reference_samples": 5,
+      "reference_shape": [
+        1,
+        1000
+      ],
+      "reference_all_finite": true,
+      "reference_repeat_bitwise_equal": true,
+      "strict_export_bitwise_equal": true,
+      "unsupported_operator_counts": {
+        "aten.div.Tensor": 1,
+        "aten.convolution.default": 52,
+        "aten._native_batch_norm_legit_no_training.default": 52,
+        "<built-in function getitem>": 52,
+        "aten.hardtanh.default": 35,
+        "aten.mean.dim": 1,
+        "aten.addmm.default": 1
+      },
+      "status": "UNSUPPORTED",
+      "reason": "div: aten.div.Tensor: need lowered arithmetic/kernel semantics; opaque reductions, GEMM, FMA and hardware MMA are unsupported",
+      "reconstruction_samples": 0
+    },
+    {
+      "task": 2,
+      "model": "resnet18",
+      "reference_samples": 5,
+      "reference_shape": [
+        1,
+        1000
+      ],
+      "reference_all_finite": true,
+      "reference_repeat_bitwise_equal": true,
+      "strict_export_bitwise_equal": true,
+      "unsupported_operator_counts": {
+        "aten.div.Tensor": 1,
+        "aten.convolution.default": 20,
+        "aten._native_batch_norm_legit_no_training.default": 20,
+        "<built-in function getitem>": 21,
+        "aten.relu.default": 17,
+        "aten.max_pool2d_with_indices.default": 1,
+        "aten.mean.dim": 1,
+        "aten.addmm.default": 1
+      },
+      "status": "UNSUPPORTED",
+      "reason": "div: aten.div.Tensor: need lowered arithmetic/kernel semantics; opaque reductions, GEMM, FMA and hardware MMA are unsupported",
+      "reconstruction_samples": 0
+    }
+  ]
+}

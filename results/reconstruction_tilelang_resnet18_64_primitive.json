@@ -1,0 +1,113 @@
+{
+  "torch": "2.6.0+cu124",
+  "python": "3.11.18",
+  "device": "cuda",
+  "compiler": "tilelang",
+  "options": {
+    "split_k": 1
+  },
+  "image_size": 64,
+  "pretrained_weights": true,
+  "mode": "primitive",
+  "seed": 20261031,
+  "random_samples": 4,
+  "image_edges": true,
+  "rows": [
+    {
+      "task": 2,
+      "model": "resnet18",
+      "mode": "primitive",
+      "compiler": "tilelang",
+      "options": {
+        "split_k": 1
+      },
+      "status": "EMPIRICAL_AGREEMENT",
+      "evidence": {
+        "samples": 8,
+        "bitwise_equal": true,
+        "is_proof": false
+      },
+      "assumptions": [
+        "Strict export faithfully represents the source for the fixed input domain; Python side effects and export specializations are not proved.",
+        "The tilelang path runs the source model's Python with only the traced GEMM-shaped calls replaced; every other operation is the PyTorch eager call of the exported graph.",
+        "Same device, PyTorch binary, dispatch and floating-point environment.",
+        "Eager execution only; no autocast, compiler, dispatch overrides or concurrent state changes.",
+        "Rounding mode stays round-to-nearest-even (not introspectable here); gradual underflow was measured on this device when the program was built and is re-checked on every call.",
+        "Each explicit primitive is one correctly rounded IEEE 754 operation in its dtype, and separate eager calls are never contracted into a fused operation.",
+        "Source artifact has the stated eager ATen semantics; weights are frozen snapshots.",
+        "The tilelang compiler lowers the kernel in kernels.py to one float32 accumulator per output element updated by a fused multiply-add in increasing k, for every tile and every output position (kernel source; FPRev chain, FMA probe and bitwise validation on this device agree).",
+        "The bias addition after the kernel is one correctly rounded float32 addition.",
+        "formula[batch_norm (inference, eps=1e-05, cudnn_enabled=True, cudnn.enabled=True) on float32[1, 64, 32, 32] on cuda:0] selected among 8 explicit candidates by bitwise validation on 10 inputs: the same for every element and independent of the values (dynamic evidence only).",
+        "invstd = rsqrt(running_var + eps) is taken from the kernel as a frozen per-channel constant; it is not recomputed from explicit primitives and is assumed to depend on the running variance and eps only.",
+        "tie convention[aten.relu.default[0.0, None] on float32[1, 64, 32, 32] on cuda:0] (the sign of a zero result) selected among explicit candidates by bitwise validation on 10 inputs, including all -0, all +0 and one ulp around each bound: the same for every element and independent of the other values (dynamic evidence only).",
+        "scan order[max_pool2d kernel (3, 3) stride (2, 2) padding (1, 1) dilation (1, 1) on float32[1, 64, 32, 32] on cuda:0]: the first maximum in row-major window order is returned at every output position (it decides only +0 against -0), read from the kernel source and validated bitwise on 7 inputs.",
+        "formula[batch_norm (inference, eps=1e-05, cudnn_enabled=True, cudnn.enabled=True) on float32[1, 64, 16, 16] on cuda:0] selected among 10 explicit candidates by bitwise validation on 10 inputs: the same for every element and independent of the values (dynamic evidence only).",
+        "tie convention[aten.relu.default[0.0, None] on float32[1, 64, 16, 16] on cuda:0] (the sign of a zero result) selected among explicit candidates by bitwise validation on 10 inputs, including all -0, all +0 and one ulp around each bound: the same for every element and independent of the other values (dynamic evidence only).",
+        "formula[batch_norm (inference, eps=1e-05, cudnn_enabled=True, cudnn.enabled=True) on float32[1, 128, 8, 8] on cuda:0] selected among 10 explicit candidates by bitwise validation on 10 inputs: the same for every element and independent of the values (dynamic evidence only).",
+        "tie convention[aten.relu.default[0.0, None] on float32[1, 128, 8, 8] on cuda:0] (the sign of a zero result) selected among explicit candidates by bitwise validation on 10 inputs, including all -0, all +0 and one ulp around each bound: the same for every element and independent of the other values (dynamic evidence only).",
+        "formula[batch_norm (inference, eps=1e-05, cudnn_enabled=True, cudnn.enabled=True) on float32[1, 256, 4, 4] on cuda:0] selected among 10 explicit candidates by bitwise validation on 10 inputs: the same for every element and independent of the values (dynamic evidence only).",
+        "tie convention[aten.relu.default[0.0, None] on float32[1, 256, 4, 4] on cuda:0] (the sign of a zero result) selected among explicit candidates by bitwise validation on 10 inputs, including all -0, all +0 and one ulp around each bound: the same for every element and independent of the other values (dynamic evidence only).",
+        "formula[batch_norm (inference, eps=1e-05, cudnn_enabled=True, cudnn.enabled=True) on float32[1, 512, 2, 2] on cuda:0] selected among 10 explicit candidates by bitwise validation on 10 inputs: the same for every element and independent of the values (dynamic evidence only).",
+        "tie convention[aten.relu.default[0.0, None] on float32[1, 512, 2, 2] on cuda:0] (the sign of a zero result) selected among explicit candidates by bitwise validation on 10 inputs, including all -0, all +0 and one ulp around each bound: the same for every element and independent of the other values (dynamic evidence only).",
+        "order[torch.nn.functional.adaptive_avg_pool2d over dims [2, 3] of float32[1, 512, 2, 2] on cuda:0 as sum / n] inferred by FPRev and validated on 5 inputs: fixed for this shape, layout, device, thread count and library build, and independent of the values (dynamic evidence only)."
+      ],
+      "preserved_kernels": [],
+      "lowered_kernels": 60,
+      "lowering_levels": [
+        "known",
+        "validated"
+      ],
+      "lowering_failures": {},
+      "lowered_examples": [
+        {
+          "node": "conv2d",
+          "target": "aten.conv2d.default",
+          "kernel": "tilelang GEMM kernel {'block_m': 64, 'block_n': 64, 'block_k': 32, 'num_stages': 2, 'threads': 128, 'split_k': 1}",
+          "arithmetic": "conv2d -> bmm [1, 64, 147] @ [.., 147, 1024]: per output element acc = +0; acc = fma(a[m,k], b[k,n], acc) for k increasing over [(0, 147)]; one fma(+0, +0, acc) for the masked tail; im2col by zero padding and strided slices; bias (if any) added afterwards with one rounding",
+          "level": "known",
+          "evidence": "{'static': 'kernels.tilelang_bmm_kernel: `T.clear(Cl)`, then `Cl[i, j] += As[i, k] * Bs[k, j]` for `ko` (T.Pipelined) and `k` (T.serial) increasing; compilers.tilelang_bmm: zero padding to split_k chunks, `.sum(1)`.', 'K': 147, 'fprev': 'k-sequential chain (146 masked pairs)', 'fma_probe': 'fma', 'validation_inputs': 5}"
+        },
+        {
+          "node": "batch_norm",
+          "target": "aten.batch_norm.default",
+          "kernel": "batch_norm (inference, eps=1e-05, cudnn_enabled=True, cudnn.enabled=True) on float32[1, 64, 32, 32] on cuda:0",
+          "arithmetic": "per element: fma(fl(fl(x - mean) * w), invstd, b); invstd is a per-channel constant read from the kernel (rsqrt(var + eps))",
+          "level": "validated",
+          "evidence": "{'validation_inputs': 10, 'candidates': 8, 'indistinguishable': [], 'invstd': 'kernel call with mean 0, weight 1, bias 0 on ones'}"
+        }
+      ],
+      "lowered_primitive_ops": {
+        "aten._to_copy.default": 126624,
+        "aten.abs.default": 31656,
+        "aten.add.Tensor": 63317,
+        "aten.bitwise_and.Scalar": 31656,
+        "aten.bitwise_and.Tensor": 63312,
+        "aten.constant_pad_nd.default": 18,
+        "aten.detach.default": 31656,
+        "aten.div.Tensor": 1,
+        "aten.eq.Scalar": 31656,
+        "aten.full_like.default": 31673,
+        "aten.gt.Scalar": 31673,
+        "aten.gt.Tensor": 8,
+        "aten.mul.Tensor": 31676,
+        "aten.ne.Scalar": 31656,
+        "aten.ne.Tensor": 31656,
+        "aten.neg.default": 31656,
+        "aten.nextafter.default": 31656,
+        "aten.permute.default": 41,
+        "aten.select.int": 5,
+        "aten.slice.Tensor": 127342,
+        "aten.stack.default": 20,
+        "aten.sub.Tensor": 126644,
+        "aten.t.default": 1,
+        "aten.unsqueeze.default": 1,
+        "aten.view.default": 124,
+        "aten.view.dtype": 31656,
+        "aten.where.self": 63337,
+        "aten.zeros.default": 21,
+        "aten.zeros_like.default": 2
+      },
+      "universal_certificate": false
+    }
+  ]
+}

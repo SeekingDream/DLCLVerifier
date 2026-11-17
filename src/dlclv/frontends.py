@@ -51,6 +51,7 @@ from typing import Any, Callable, List, Optional, Sequence
 import numpy as np
 
 from .graph import GraphError, Node, TensorGraph, Value
+from .bitwise import bitwise_equal
 from .stubs import Frontend, Unimplemented
 
 # ATen op -> the handler name of compilers.GemmMode that can run it on a Triton/TileLang kernel.
@@ -151,6 +152,7 @@ def check_fidelity(g: TensorGraph, reference: Sequence, actual: Sequence, what: 
                               f"program returned {len(actual)}")
     worst, bitwise = 0.0, True
     for k, (r, a) in enumerate(zip(reference, actual)):
+        bitwise &= bitwise_equal(r, a)
         r, a = _to_np(r), _to_np(a)
         if r.shape != a.shape or r.dtype != a.dtype:
             raise ExtractionError(f"{what}: output {k} is {r.dtype}{list(r.shape)} in the graph "
@@ -170,7 +172,6 @@ def check_fidelity(g: TensorGraph, reference: Sequence, actual: Sequence, what: 
                     f"{what}: output {k} of the extracted graph differs from the program by "
                     f"{d:.3g} (values up to {scale:.3g}); the graph is not this program's graph")
             worst = max(worst, d)
-        bitwise &= bool(np.array_equal(r, a, equal_nan=True))
     fid = {"against": what, "max_abs_diff": worst, "bitwise_equal": bitwise,
            "outputs": len(reference)}
     g.meta["fidelity"] = fid
@@ -229,14 +230,12 @@ def _literal(x):
 
 
 def _same(a, b) -> bool:
-    """Bitwise-equal results of two runs (NaN equals NaN)."""
+    """Compare result bits, including signed zeros and NaN payloads."""
     import torch
     if isinstance(a, torch.Tensor):
         if not isinstance(b, torch.Tensor) or a.shape != b.shape or a.dtype != b.dtype:
             return False
-        if a.is_floating_point() or a.is_complex():
-            return bool(((a == b) | ((a != a) & (b != b))).all())
-        return bool(torch.equal(a, b))
+        return bitwise_equal(a, b)
     if isinstance(a, (list, tuple)):
         return isinstance(b, (list, tuple)) and len(a) == len(b) and \
             all(_same(x, y) for x, y in zip(a, b))

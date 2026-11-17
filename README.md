@@ -5,7 +5,39 @@ or kernel DSL. The repository has the models, compilers and differential testing
 evaluation, and a prototype certifier (`src/dlclv`, section "Certifier"). No baseline is
 integrated yet.
 
-## Scope
+## Reconstruction frontend
+
+`dlclv.reconstruction` rebuilds what a program actually computes as explicit eager PyTorch
+arithmetic (one call per addition, multiplication, cast or indexing step) with the goal of
+bitwise equality with the original, not closeness.
+
+```python
+from dlclv.reconstruction import reconstruct
+aprime = reconstruct(utils.load_compiler("triton")(model, inputs), inputs, probe_kernels=True)
+print(aprime.code, aprime.report)      # primitive mode: no opaque kernel left, or it raises
+```
+
+- Triton and TileLang GEMM kernels (`kernels.py`) are lowered from the kernel source to one
+  FMA chain per output element in k order, with split-K partial sums, masked tails and signed
+  zeros; the kernel is then checked on the GPU (FPRev, FMA probe, bitwise validation).
+- A float32 FMA with a single rounding is built from float64 operations (`primitives.fma32`).
+- PyTorch library kernels are rebuilt from behaviour with `probe_kernels=True`: `linear`,
+  `sum` / `mean` / global average pooling, cuDNN's GEMM-style convolutions, ReLU and clamps,
+  max pooling and inference batch norm. That evidence is dynamic only.
+- A CNN on the Triton or TileLang path (pretrained ResNet18 included) is reconstructed with
+  no opaque kernel left.
+- A `tvm` program is reconstructed from its lowered representation: the Relax `main` gives
+  the graph and every kernel is executed from its scheduled TIR, statement by statement
+  (`tir_lowering.py`). The order of every reduction is read from the TIR; FMA contraction and
+  the `max`/`min` tie convention are checked against each compiled kernel.
+- Everything else is rejected in `mode="primitive"` or kept as the same opaque library call in
+  `mode="eager-kernel"`. cuDNN's 3x3 stride-1 convolution algorithm has no float32 FMA-tree
+  model and is refused; TorchInductor, ONNX Runtime and TensorRT programs are unsupported.
+- Results are conditional on stated assumptions and never a certificate for all inputs.
+
+See [scope, assumptions and evidence levels](docs/RECONSTRUCTION.md).
+
+## Scope (drift certifier)
 
 The target is drift caused by **non-associativity of floating-point addition**, such as
 `(a+b)+c ≠ a+(b+c)`: the same operands summed in a different order. FMA contraction, precision
@@ -140,11 +172,16 @@ All paths run float32 with TF32 off, so outputs differ only by addition order.
 | 3 | `tensorrt` | TensorRT layer fusion and tactic selection | `optimization_level` |
 | 4 | `triton` | linear, matmul, conv as a Triton GEMM | `block_*`, `split_k`, `num_stages` |
 | 5 | `tilelang` | linear, matmul, conv as a TileLang GEMM | `block_*`, `split_k`, `num_stages` |
+| 6 | `tvm` | TVM Relax: every operator as a scheduled TIR loop nest compiled to CUDA, no cuDNN/cuBLAS | `schedule`, `fuse` |
 
 - TileLang's `T.gemm` uses TF32 for float32, so its kernel accumulates with explicit fp32 FMA.
 - With default options `triton` and `tilelang` agree bitwise: both sum each dot product in k
   order, and tile sizes do not change that. `split_k > 1` gives a different addition tree.
 - FMA contraction inside GPU kernels is not controlled.
+- `tvm` uses the TVM build bundled with TileLang (or an installed `tvm`) and needs an `nvcc`
+  with its headers; `compile_tvm` puts a matching `/usr/local/cuda-*` toolkit on `PATH` itself.
+  `schedule="fallback"` (default) keeps every reduction a serial loop in TIR order;
+  `schedule="default"` does not build for CUDA with TileLang 0.1.15's TVM.
 
 ## Tests
 
@@ -160,7 +197,10 @@ CUDA_VISIBLE_DEVICES=7 python test/test_layer_bounds.py     # rounding bound vs 
 CUDA_VISIBLE_DEVICES=7 python test/test_linear.py           # one linear layer, eager vs each path
 CUDA_VISIBLE_DEVICES=7 python test/test_lenet5.py           # LeNet-5, eager vs each path
 CUDA_VISIBLE_DEVICES=7 python test/test_fprev_gpu.py        # GEMM accumulation orders (FPRev)
-pytest                                                      # src/dlclv: matching, bounds, FPRev
+pytest                                                      # src/dlclv: matching, bounds, FPRev,
+                                                            # reconstruction (GPU kernels if CUDA)
+CUDA_VISIBLE_DEVICES=7 python test/test_reconstruction_models.py --tasks 2 --device cuda \
+    --compiler triton --image-size 64 --mode primitive --probe-kernels   # ResNet18, bitwise
 ```
 
 ## Baselines
@@ -179,7 +219,9 @@ test/           GPU tests for the above
 configs/        compilation paths, benchmarks, datasets, domains, experiment protocol
 docs/           specification, evaluation plan, pilot results, references
 baselines/      baseline registry and integration plan
-src/dlclv/      certifier: graph extraction, matching, FP error model, FPRev, abstract interpretation
+src/dlclv/      certifier: graph extraction, matching, FP error model, FPRev, abstract interpretation;
+                reconstruction: reconstruction.py, lowering.py, eager_lowering.py,
+                tir_lowering.py, primitives.py
 pilot/          earlier exploratory CPU measurement (docs/PILOT_RESULTS.md)
 tests/          tests for src/dlclv
 ```
